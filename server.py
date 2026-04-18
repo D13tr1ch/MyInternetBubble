@@ -519,11 +519,121 @@ _trace_max_concurrent = 2
 # --- GeoIP Cache (in-memory, lives for server lifetime) ---
 _geo_cache = {}
 
+# --- GeoIP Provider Round-Robin (avoids Total Uptime / ip-api.com) ---
+_geo_providers = [
+    {
+        "name": "ipwho.is",
+        "url": "https://ipwho.is/{ip}",
+        "ok": lambda d: d.get("success") is True,
+        "parse": lambda d: {
+            "lat": d.get("latitude", 0),
+            "lon": d.get("longitude", 0),
+            "city": d.get("city", ""),
+            "region": d.get("region", ""),
+            "country": d.get("country", ""),
+            "isp": d.get("connection", {}).get("isp", ""),
+            "org": d.get("connection", {}).get("org", ""),
+            "as": "AS{} {}".format(
+                d.get("connection", {}).get("asn", ""),
+                d.get("connection", {}).get("org", ""),
+            ).strip(),
+        },
+    },
+    {
+        "name": "ipapi.co",
+        "url": "https://ipapi.co/{ip}/json/",
+        "ok": lambda d: "latitude" in d and not d.get("error"),
+        "parse": lambda d: {
+            "lat": d.get("latitude", 0),
+            "lon": d.get("longitude", 0),
+            "city": d.get("city", ""),
+            "region": d.get("region", ""),
+            "country": d.get("country_name", ""),
+            "isp": d.get("org", ""),
+            "org": d.get("org", ""),
+            "as": "AS{}".format(d.get("asn", "")) if d.get("asn") else "",
+        },
+    },
+    {
+        "name": "freeipapi.com",
+        "url": "https://freeipapi.com/api/json/{ip}",
+        "ok": lambda d: "latitude" in d,
+        "parse": lambda d: {
+            "lat": d.get("latitude", 0),
+            "lon": d.get("longitude", 0),
+            "city": d.get("cityName", ""),
+            "region": d.get("regionName", ""),
+            "country": d.get("countryName", ""),
+            "isp": "",
+            "org": "",
+            "as": "",
+        },
+    },
+]
+_geo_rr_index = 0
+
+
+def _geolocate_ip(ip_str):
+    """Geolocate a single IP using round-robin providers with fallback."""
+    global _geo_rr_index
+    if ip_str in _geo_cache:
+        return _geo_cache[ip_str]
+    for _ in range(len(_geo_providers)):
+        provider = _geo_providers[_geo_rr_index % len(_geo_providers)]
+        _geo_rr_index += 1
+        try:
+            resp = http_requests.get(
+                provider["url"].format(ip=ip_str), timeout=5,
+                headers={"User-Agent": "DigitalFingerprintTracker/1.0"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if provider["ok"](data):
+                    geo = provider["parse"](data)
+                    _geo_cache[ip_str] = geo
+                    return geo
+        except Exception:
+            continue
+    return None
+
+
+def _geolocate_batch(ip_list):
+    """Geolocate a list of IPs, round-robining across providers. Returns dict of ip->geo."""
+    results = {}
+    for ip in ip_list:
+        geo = _geolocate_ip(ip)
+        if geo:
+            results[ip] = geo
+    return results
+
+
+def _get_own_public_ip():
+    """Detect own public IP and geolocate it (cached)."""
+    if "_self" in _geo_cache:
+        return _geo_cache["_self"]["ip"], _geo_cache["_self"]["geo"]
+    own_ip = None
+    for url in ("https://api.ipify.org?format=json", "https://ipwho.is/"):
+        try:
+            r = http_requests.get(url, timeout=5)
+            if r.status_code == 200:
+                d = r.json()
+                own_ip = d.get("ip") or d.get("query")
+                if own_ip:
+                    break
+        except Exception:
+            continue
+    if not own_ip:
+        return None, None
+    own_geo = _geolocate_ip(own_ip)
+    if own_geo:
+        _geo_cache["_self"] = {"ip": own_ip, "geo": own_geo}
+    return own_ip, own_geo
+
 
 @app.route("/api/geolocate", methods=["POST"])
 def geolocate():
     """
-    Batch geolocate IPs using ip-api.com free endpoint.
+    Batch geolocate IPs using round-robin free providers.
     Accepts {"ips": ["1.2.3.4", ...]} — max 100 per call.
     Returns {"results": {ip: {lat, lon, city, region, country, isp, org, as}, ...}}
     """
@@ -545,69 +655,11 @@ def geolocate():
         except ValueError:
             continue
 
-    results = {}
+    # Geolocate via round-robin providers (cache-aware)
+    results = _geolocate_batch(valid_ips)
 
-    # Return cached entries immediately
-    to_lookup = []
-    for ip in valid_ips:
-        if ip in _geo_cache:
-            results[ip] = _geo_cache[ip]
-        else:
-            to_lookup.append(ip)
-
-    # Batch lookup uncached IPs via ip-api.com (free, 45 req/min, batch of 100)
-    if to_lookup:
-        try:
-            batch_payload = [
-                {"query": ip, "fields": "status,message,country,regionName,city,lat,lon,isp,org,as,query"}
-                for ip in to_lookup
-            ]
-            resp = http_requests.post(
-                "http://ip-api.com/batch?fields=status,message,country,regionName,city,lat,lon,isp,org,as,query",
-                json=batch_payload,
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                for entry in resp.json():
-                    if entry.get("status") == "success":
-                        ip = entry["query"]
-                        geo = {
-                            "lat": entry["lat"],
-                            "lon": entry["lon"],
-                            "city": entry.get("city", ""),
-                            "region": entry.get("regionName", ""),
-                            "country": entry.get("country", ""),
-                            "isp": entry.get("isp", ""),
-                            "org": entry.get("org", ""),
-                            "as": entry.get("as", ""),
-                        }
-                        _geo_cache[ip] = geo
-                        results[ip] = geo
-        except Exception:
-            pass  # Fail gracefully — frontend handles missing entries
-
-    # Also geolocate the user's own public IP for the map center
-    own_ip = None
-    own_geo = None
-    if "_self" not in _geo_cache:
-        try:
-            r = http_requests.get("http://ip-api.com/json/?fields=status,query,lat,lon,city,regionName,country,isp,org,as", timeout=5)
-            if r.status_code == 200:
-                d = r.json()
-                if d.get("status") == "success":
-                    own_ip = d["query"]
-                    own_geo = {
-                        "lat": d["lat"], "lon": d["lon"],
-                        "city": d.get("city", ""), "region": d.get("regionName", ""),
-                        "country": d.get("country", ""), "isp": d.get("isp", ""),
-                        "org": d.get("org", ""), "as": d.get("as", ""),
-                    }
-                    _geo_cache["_self"] = {"ip": own_ip, "geo": own_geo}
-        except Exception:
-            pass
-    else:
-        own_ip = _geo_cache["_self"]["ip"]
-        own_geo = _geo_cache["_self"]["geo"]
+    # Own public IP for map center
+    own_ip, own_geo = _get_own_public_ip()
 
     return jsonify({
         "results": results,
@@ -672,73 +724,11 @@ def trace_and_locate():
         except ValueError:
             continue
 
-    # 3. Batch geolocate — use cache, only look up uncached
-    geo_results = {}
-    to_lookup = []
-    for ip in ips_for_lookup:
-        if ip in _geo_cache:
-            geo_results[ip] = _geo_cache[ip]
-        else:
-            to_lookup.append(ip)
-
-    if to_lookup:
-        # ip-api.com batch supports 100 per request
-        for batch_start in range(0, len(to_lookup), 100):
-            batch = to_lookup[batch_start:batch_start + 100]
-            try:
-                batch_payload = [
-                    {"query": ip, "fields": "status,message,country,regionName,city,lat,lon,isp,org,as,query"}
-                    for ip in batch
-                ]
-                resp = http_requests.post(
-                    "http://ip-api.com/batch?fields=status,message,country,regionName,city,lat,lon,isp,org,as,query",
-                    json=batch_payload,
-                    timeout=10,
-                )
-                if resp.status_code == 200:
-                    for entry in resp.json():
-                        if entry.get("status") == "success":
-                            ip = entry["query"]
-                            geo = {
-                                "lat": entry["lat"],
-                                "lon": entry["lon"],
-                                "city": entry.get("city", ""),
-                                "region": entry.get("regionName", ""),
-                                "country": entry.get("country", ""),
-                                "isp": entry.get("isp", ""),
-                                "org": entry.get("org", ""),
-                                "as": entry.get("as", ""),
-                            }
-                            _geo_cache[ip] = geo
-                            geo_results[ip] = geo
-            except Exception:
-                pass
+    # 3. Batch geolocate via round-robin providers (cache-aware)
+    geo_results = _geolocate_batch(ips_for_lookup)
 
     # 4. Get self location
-    own_ip = None
-    own_geo = None
-    if "_self" in _geo_cache:
-        own_ip = _geo_cache["_self"]["ip"]
-        own_geo = _geo_cache["_self"]["geo"]
-    else:
-        try:
-            r = http_requests.get(
-                "http://ip-api.com/json/?fields=status,query,lat,lon,city,regionName,country,isp,org,as",
-                timeout=5,
-            )
-            if r.status_code == 200:
-                d = r.json()
-                if d.get("status") == "success":
-                    own_ip = d["query"]
-                    own_geo = {
-                        "lat": d["lat"], "lon": d["lon"],
-                        "city": d.get("city", ""), "region": d.get("regionName", ""),
-                        "country": d.get("country", ""), "isp": d.get("isp", ""),
-                        "org": d.get("org", ""), "as": d.get("as", ""),
-                    }
-                    _geo_cache["_self"] = {"ip": own_ip, "geo": own_geo}
-        except Exception:
-            pass
+    own_ip, own_geo = _get_own_public_ip()
 
     # 5. Build response — targets with their trace hops annotated with geo
     targets = {}
