@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Digital Fingerprint Tracker</title>
+    <link rel="stylesheet" href="/static/css/style.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+</head>
+<body>
+    <!-- Loading state -->
+    <div id="loading">
+        <div class="spinner"></div>
+        <p>Collecting your digital fingerprint...</p>
+    </div>
+
+    <!-- Main app -->
+    <div id="app" style="display: none;">
+        <div class="header">
+            <h1>Digital Fingerprint Tracker</h1>
+            <p>Local privacy awareness dashboard &mdash; all data stays on your machine</p>
+        </div>
+
+        <div class="container">
+            <!-- Score Card -->
+            <div class="section" id="score-card"></div>
+
+            <!-- Digital Footprint Audit -->
+            <div class="section" id="audit-section"></div>
+
+            <!-- Browser Fingerprint -->
+            <div class="section" id="browser-section"></div>
+
+            <!-- Network Fingerprint -->
+            <div class="section" id="network-section"></div>
+
+            <!-- Geographic Connection Map -->
+            <div class="section" id="geo-map-section"></div>
+
+            <!-- Network Connection Map -->
+            <div class="section" id="network-map-section"></div>
+
+            <!-- Canvas Preview -->
+            <div class="section" id="canvas-section"></div>
+
+            <!-- Recommendations -->
+            <div class="section" id="recommendations-section"></div>
+
+            <!-- Raw Data -->
+            <div class="section" id="raw-section"></div>
+        </div>
+    </div>
+
+    <script src="/static/js/fingerprint.js"></script>
+    <script src="/static/js/geo-map.js"></script>
+    <script src="/static/js/network-map.js"></script>
+</body>
+</html>

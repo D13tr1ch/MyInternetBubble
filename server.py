@@ -1,0 +1,776 @@
+"""
+Digital Fingerprint Tracker — Local Privacy Awareness Dashboard
+Runs a local Flask server that shows what your browser, network, and device expose.
+All data stays local. Nothing is sent to external servers (except optional breach checks).
+"""
+
+import hashlib
+import ipaddress
+import json
+import re
+import socket
+import struct
+import subprocess
+import time
+from collections import defaultdict
+
+import requests as http_requests
+from flask import Flask, jsonify, render_template, request
+
+app = Flask(__name__, static_folder="static", template_folder="templates")
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/api/network-fingerprint")
+def network_fingerprint():
+    """Collect what the network layer reveals about the client."""
+    # Request headers (what the browser sends to every website)
+    headers = {k: v for k, v in request.headers}
+
+    # Client IP as seen by this server
+    client_ip = request.remote_addr
+
+    # Derive a header-based fingerprint hash
+    header_str = json.dumps(headers, sort_keys=True)
+    header_hash = hashlib.sha256(header_str.encode()).hexdigest()[:16]
+
+    # Server-side DNS info
+    hostname = socket.gethostname()
+    try:
+        local_ips = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC)
+        local_addresses = list({addr[4][0] for addr in local_ips})
+    except socket.gaierror:
+        local_addresses = []
+
+    # Header analysis — flag privacy-relevant headers
+    privacy_flags = []
+    if "X-Forwarded-For" in headers:
+        privacy_flags.append("X-Forwarded-For header present — proxy chain visible")
+    if headers.get("Dnt") == "1":
+        privacy_flags.append("Do Not Track enabled (most sites ignore this)")
+    if "Sec-Ch-Ua" in headers:
+        privacy_flags.append("Client Hints expose detailed browser/OS version")
+    if "Referer" in headers:
+        privacy_flags.append(f"Referer header leaks previous page: {headers['Referer']}")
+    ua = headers.get("User-Agent", "")
+    if ua:
+        privacy_flags.append("User-Agent string reveals browser, OS, and device details")
+
+    # Accept-Language analysis
+    lang = headers.get("Accept-Language", "")
+    if lang:
+        privacy_flags.append(f"Accept-Language reveals locale preferences: {lang}")
+
+    return jsonify(
+        {
+            "client_ip": client_ip,
+            "headers": headers,
+            "header_fingerprint_hash": header_hash,
+            "local_hostname": hostname,
+            "local_addresses": local_addresses,
+            "privacy_flags": privacy_flags,
+            "header_count": len(headers),
+        }
+    )
+
+
+@app.route("/api/fingerprint-summary", methods=["POST"])
+def fingerprint_summary():
+    """
+    Receive the full client-side + server-side fingerprint data,
+    compute a combined uniqueness hash, and return a privacy score.
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    # Combine key fields into a master fingerprint
+    components = [
+        data.get("userAgent", ""),
+        data.get("platform", ""),
+        data.get("language", ""),
+        str(data.get("screenResolution", "")),
+        str(data.get("colorDepth", "")),
+        data.get("timezone", ""),
+        data.get("canvasHash", ""),
+        data.get("webglRenderer", ""),
+        data.get("webglVendor", ""),
+        str(data.get("hardwareConcurrency", "")),
+        str(data.get("deviceMemory", "")),
+        str(data.get("touchSupport", "")),
+        data.get("audioHash", ""),
+    ]
+    combined = "|".join(components)
+    master_hash = hashlib.sha256(combined.encode()).hexdigest()
+
+    # Privacy score: more unique traits = more trackable (higher = worse)
+    uniqueness_factors = 0
+    max_factors = 13
+
+    if data.get("canvasHash"):
+        uniqueness_factors += 2  # Canvas is highly unique
+    if data.get("webglRenderer"):
+        uniqueness_factors += 2
+    if data.get("audioHash"):
+        uniqueness_factors += 2
+    if data.get("fonts") and len(data["fonts"]) > 10:
+        uniqueness_factors += 2
+    if data.get("hardwareConcurrency"):
+        uniqueness_factors += 1
+    if data.get("deviceMemory"):
+        uniqueness_factors += 1
+    if data.get("screenResolution"):
+        uniqueness_factors += 1
+    if data.get("timezone"):
+        uniqueness_factors += 1
+    if data.get("plugins") and len(data.get("plugins", [])) > 0:
+        uniqueness_factors += 1
+
+    score = min(100, int((uniqueness_factors / max_factors) * 100))
+
+    if score >= 75:
+        rating = "High"
+        advice = "Your browser is highly unique and easily trackable. Consider using a privacy-focused browser like Tor or Brave with strict settings."
+    elif score >= 45:
+        rating = "Medium"
+        advice = "Your fingerprint has moderate uniqueness. Use browser extensions like CanvasBlocker, disable WebGL, and standardize your setup."
+    else:
+        rating = "Low"
+        advice = "Your fingerprint is relatively common. Keep privacy extensions active to maintain this."
+
+    recommendations = _get_recommendations(data)
+
+    return jsonify(
+        {
+            "master_fingerprint_hash": master_hash,
+            "uniqueness_score": score,
+            "rating": rating,
+            "advice": advice,
+            "recommendations": recommendations,
+            "component_count": len([c for c in components if c]),
+        }
+    )
+
+
+@app.route("/api/network-connections")
+def network_connections():
+    """
+    Collect active TCP connections from the OS.
+    Returns a graph-friendly structure of nodes and edges.
+    """
+    connections = _get_tcp_connections()
+    nodes, edges = _build_connection_graph(connections)
+    return jsonify({"nodes": nodes, "edges": edges, "connection_count": len(connections)})
+
+
+@app.route("/api/resolve-host")
+def resolve_host():
+    """Lazily resolve a single IP to a hostname (called from frontend)."""
+    ip = request.args.get("ip", "").strip()
+    if not ip:
+        return jsonify({"error": "No IP provided"}), 400
+    # Validate it's actually an IP address to prevent SSRF via DNS
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return jsonify({"error": "Invalid IP address"}), 400
+    hostname = _resolve_hostname(ip)
+    return jsonify({"ip": ip, "hostname": hostname})
+
+
+@app.route("/api/traceroute")
+def traceroute():
+    """Run a traceroute to a given IP and return the hop path."""
+    global _trace_active
+    ip = request.args.get("ip", "").strip()
+    if not ip:
+        return jsonify({"error": "No IP provided"}), 400
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return jsonify({"error": "Invalid IP address"}), 400
+
+    # Return cached result if fresh
+    cached = _trace_cache.get(ip)
+    if cached and (time.time() - cached["timestamp"]) < _trace_cache_ttl:
+        return jsonify({"ip": ip, "hops": cached["hops"], "cached": True})
+
+    # Enforce concurrency limit
+    if _trace_active >= _trace_max_concurrent:
+        return jsonify({"error": "Too many traceroutes in progress, try again shortly", "busy": True}), 429
+
+    _trace_active += 1
+    try:
+        hops = _run_traceroute(ip)
+        _trace_cache[ip] = {"hops": hops, "timestamp": time.time()}
+        return jsonify({"ip": ip, "hops": hops, "cached": False})
+    finally:
+        _trace_active -= 1
+
+
+def _run_traceroute(target_ip, max_hops=15):
+    """Run tracert on Windows and parse the output into hop list."""
+    hops = []
+    try:
+        result = subprocess.run(
+            ["tracert", "-d", "-w", "1000", "-h", str(max_hops), target_ip],
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line or line.startswith("Tracing") or line.startswith("Trace") or line.startswith("over"):
+                continue
+            parts = line.split()
+            if not parts or not parts[0].isdigit():
+                continue
+            hop_num = int(parts[0])
+            hop_ip = None
+            for part in reversed(parts):
+                try:
+                    ipaddress.ip_address(part)
+                    hop_ip = part
+                    break
+                except ValueError:
+                    continue
+            rtts = []
+            for part in parts[1:]:
+                if part == "*":
+                    rtts.append(None)
+                elif part == "<1":
+                    rtts.append(0.5)
+                else:
+                    try:
+                        val = float(part)
+                        rtts.append(val)
+                    except ValueError:
+                        pass
+            avg_rtt = None
+            valid_rtts = [r for r in rtts if r is not None]
+            if valid_rtts:
+                avg_rtt = round(sum(valid_rtts) / len(valid_rtts), 1)
+            hops.append({
+                "hop": hop_num,
+                "ip": hop_ip,
+                "rtt_ms": avg_rtt,
+                "timeout": hop_ip is None,
+                "group": _classify_ip(hop_ip) if hop_ip else "unknown",
+            })
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return hops
+
+
+def _get_tcp_connections():
+    """Get active TCP connections with process names in a single PowerShell call."""
+    connections = []
+    try:
+        # Single batched call: join connection data with process names
+        ps_script = (
+            "Get-NetTCPConnection -State Established,Listen,TimeWait,CloseWait "
+            "-ErrorAction SilentlyContinue | ForEach-Object { "
+            "$pn = 'unknown'; "
+            "try { $p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; "
+            "if ($p) { $pn = $p.ProcessName } } catch {}; "
+            "[PSCustomObject]@{ "
+            "LA=$_.LocalAddress; LP=$_.LocalPort; "
+            "RA=$_.RemoteAddress; RP=$_.RemotePort; "
+            "S=[int]$_.State; OP=$_.OwningProcess; PN=$pn "
+            "} } | ConvertTo-Json -Depth 2 -Compress"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            data = json.loads(result.stdout)
+            if isinstance(data, dict):
+                data = [data]
+            for conn in data:
+                remote_addr = conn.get("RA", "")
+                if remote_addr in ("127.0.0.1", "::1", "0.0.0.0", "::"):
+                    continue
+                connections.append(
+                    {
+                        "local_address": conn.get("LA", ""),
+                        "local_port": conn.get("LP", 0),
+                        "remote_address": remote_addr,
+                        "remote_port": conn.get("RP", 0),
+                        "state": _map_tcp_state(conn.get("S", 0)),
+                        "pid": conn.get("OP", 0),
+                        "process": conn.get("PN", "unknown"),
+                    }
+                )
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+        pass
+    return connections
+
+
+def _map_tcp_state(state_val):
+    """Map numeric TCP state to human-readable string."""
+    state_map = {
+        1: "Closed",
+        2: "Listen",
+        3: "SynSent",
+        4: "SynReceived",
+        5: "Established",
+        6: "FinWait1",
+        7: "FinWait2",
+        8: "CloseWait",
+        9: "Closing",
+        10: "LastAck",
+        11: "TimeWait",
+        12: "DeleteTCB",
+    }
+    if isinstance(state_val, int):
+        return state_map.get(state_val, f"Unknown({state_val})")
+    return str(state_val)
+
+
+def _resolve_hostname(ip):
+    """Reverse-DNS lookup. Returns hostname or None. Has a short timeout."""
+    try:
+        # Set a low timeout to avoid blocking on unresponsive DNS
+        socket.setdefaulttimeout(1.5)
+        host = socket.gethostbyaddr(ip)[0]
+        return host
+    except (socket.herror, socket.gaierror, OSError, socket.timeout):
+        return None
+    finally:
+        socket.setdefaulttimeout(None)
+
+
+def _classify_ip(ip_str):
+    """Classify an IP address for visual grouping."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        if ip.is_private:
+            return "private"
+        if ip.is_loopback:
+            return "loopback"
+        if ip.is_link_local:
+            return "link-local"
+        if ip.is_multicast:
+            return "multicast"
+        return "public"
+    except ValueError:
+        return "unknown"
+
+
+def _build_connection_graph(connections):
+    """
+    Build a graph of nodes (IPs/processes) and edges (connections)
+    suitable for the frontend visualization.
+    """
+    nodes_map = {}
+    edges = []
+
+    # Add local machine as central node
+    hostname = socket.gethostname()
+    nodes_map["local"] = {
+        "id": "local",
+        "label": hostname,
+        "type": "local",
+        "ip": "127.0.0.1",
+        "group": "local",
+    }
+
+    # Group connections by remote address for cleaner graph
+    remote_groups = defaultdict(list)
+    for conn in connections:
+        remote_groups[conn["remote_address"]].append(conn)
+
+    for remote_ip, conns in remote_groups.items():
+        node_id = f"remote_{remote_ip}"
+        ip_class = _classify_ip(remote_ip)
+
+        nodes_map[node_id] = {
+            "id": node_id,
+            "label": remote_ip,
+            "type": "remote",
+            "ip": remote_ip,
+            "group": ip_class,
+            "hostname": None,
+            "connection_count": len(conns),
+        }
+
+        # Aggregate processes and ports for edge metadata
+        processes = list({c["process"] for c in conns})
+        ports = list({c["remote_port"] for c in conns})
+        states = list({c["state"] for c in conns})
+
+        edges.append(
+            {
+                "source": "local",
+                "target": node_id,
+                "processes": processes,
+                "remote_ports": sorted(ports),
+                "states": states,
+                "count": len(conns),
+            }
+        )
+
+    # Also add unique process nodes for detail
+    process_conns = defaultdict(list)
+    for conn in connections:
+        process_conns[conn["process"]].append(conn)
+
+    for proc_name, conns in process_conns.items():
+        node_id = f"process_{proc_name}"
+        remote_ips = list({c["remote_address"] for c in conns})
+        nodes_map[node_id] = {
+            "id": node_id,
+            "label": proc_name,
+            "type": "process",
+            "group": "process",
+            "connection_count": len(conns),
+            "remote_targets": remote_ips[:10],  # Limit for display
+        }
+
+    nodes = list(nodes_map.values())
+    return nodes, edges
+
+
+def _get_recommendations(data):
+    """Generate actionable privacy recommendations based on collected data."""
+    recs = []
+
+    ua = data.get("userAgent", "")
+    if "Chrome" in ua and "Brave" not in ua:
+        recs.append(
+            {
+                "category": "Browser",
+                "issue": "Using standard Chrome — highly fingerprintable",
+                "action": "Consider Brave, Firefox with resistFingerprinting, or Tor Browser",
+            }
+        )
+
+    if data.get("webglRenderer"):
+        recs.append(
+            {
+                "category": "WebGL",
+                "issue": f"GPU exposed: {data['webglRenderer']}",
+                "action": "Disable WebGL or use WebGL fingerprint spoofing extension",
+            }
+        )
+
+    if data.get("canvasHash"):
+        recs.append(
+            {
+                "category": "Canvas",
+                "issue": "Canvas fingerprint is computable",
+                "action": "Install CanvasBlocker extension to add noise to canvas reads",
+            }
+        )
+
+    fonts = data.get("fonts", [])
+    if len(fonts) > 20:
+        recs.append(
+            {
+                "category": "Fonts",
+                "issue": f"{len(fonts)} unique fonts detected — highly identifying",
+                "action": "Reduce installed fonts or use a browser that blocks font enumeration",
+            }
+        )
+
+    if data.get("webrtcLeaks"):
+        recs.append(
+            {
+                "category": "WebRTC",
+                "issue": "Local IP addresses leaked via WebRTC",
+                "action": "Disable WebRTC or use uBlock Origin to prevent WebRTC leaks",
+            }
+        )
+
+    if not data.get("doNotTrack"):
+        recs.append(
+            {
+                "category": "DNT",
+                "issue": "Do Not Track is disabled",
+                "action": 'Enable DNT in browser settings (note: most sites ignore it, but it\'s still a signal)',
+            }
+        )
+
+    if data.get("cookiesEnabled"):
+        recs.append(
+            {
+                "category": "Cookies",
+                "issue": "Third-party cookies may be enabled",
+                "action": "Block third-party cookies in browser settings",
+            }
+        )
+
+    return recs
+
+
+# --- Traceroute cache & rate limiting ---
+_trace_cache = {}       # ip -> {"hops": [...], "timestamp": float}
+_trace_cache_ttl = 300  # 5 minutes
+_trace_active = 0       # current running traceroutes
+_trace_max_concurrent = 2
+
+# --- GeoIP Cache (in-memory, lives for server lifetime) ---
+_geo_cache = {}
+
+
+@app.route("/api/geolocate", methods=["POST"])
+def geolocate():
+    """
+    Batch geolocate IPs using ip-api.com free endpoint.
+    Accepts {"ips": ["1.2.3.4", ...]} — max 100 per call.
+    Returns {"results": {ip: {lat, lon, city, region, country, isp, org, as}, ...}}
+    """
+    data = request.get_json(silent=True)
+    if not data or "ips" not in data:
+        return jsonify({"error": "POST body must contain 'ips' array"}), 400
+
+    raw_ips = data["ips"]
+    if not isinstance(raw_ips, list):
+        return jsonify({"error": "'ips' must be a list"}), 400
+
+    # Validate and deduplicate
+    valid_ips = []
+    for ip_str in raw_ips[:100]:
+        try:
+            addr = ipaddress.ip_address(str(ip_str).strip())
+            if not addr.is_private and not addr.is_loopback and not addr.is_link_local:
+                valid_ips.append(str(addr))
+        except ValueError:
+            continue
+
+    results = {}
+
+    # Return cached entries immediately
+    to_lookup = []
+    for ip in valid_ips:
+        if ip in _geo_cache:
+            results[ip] = _geo_cache[ip]
+        else:
+            to_lookup.append(ip)
+
+    # Batch lookup uncached IPs via ip-api.com (free, 45 req/min, batch of 100)
+    if to_lookup:
+        try:
+            batch_payload = [
+                {"query": ip, "fields": "status,message,country,regionName,city,lat,lon,isp,org,as,query"}
+                for ip in to_lookup
+            ]
+            resp = http_requests.post(
+                "http://ip-api.com/batch?fields=status,message,country,regionName,city,lat,lon,isp,org,as,query",
+                json=batch_payload,
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                for entry in resp.json():
+                    if entry.get("status") == "success":
+                        ip = entry["query"]
+                        geo = {
+                            "lat": entry["lat"],
+                            "lon": entry["lon"],
+                            "city": entry.get("city", ""),
+                            "region": entry.get("regionName", ""),
+                            "country": entry.get("country", ""),
+                            "isp": entry.get("isp", ""),
+                            "org": entry.get("org", ""),
+                            "as": entry.get("as", ""),
+                        }
+                        _geo_cache[ip] = geo
+                        results[ip] = geo
+        except Exception:
+            pass  # Fail gracefully — frontend handles missing entries
+
+    # Also geolocate the user's own public IP for the map center
+    own_ip = None
+    own_geo = None
+    if "_self" not in _geo_cache:
+        try:
+            r = http_requests.get("http://ip-api.com/json/?fields=status,query,lat,lon,city,regionName,country,isp,org,as", timeout=5)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("status") == "success":
+                    own_ip = d["query"]
+                    own_geo = {
+                        "lat": d["lat"], "lon": d["lon"],
+                        "city": d.get("city", ""), "region": d.get("regionName", ""),
+                        "country": d.get("country", ""), "isp": d.get("isp", ""),
+                        "org": d.get("org", ""), "as": d.get("as", ""),
+                    }
+                    _geo_cache["_self"] = {"ip": own_ip, "geo": own_geo}
+        except Exception:
+            pass
+    else:
+        own_ip = _geo_cache["_self"]["ip"]
+        own_geo = _geo_cache["_self"]["geo"]
+
+    return jsonify({
+        "results": results,
+        "self_ip": own_ip,
+        "self_geo": own_geo,
+    })
+
+
+@app.route("/api/trace-and-locate", methods=["POST"])
+def trace_and_locate():
+    """
+    For each public IP: run 1 traceroute (cached), collect all hop IPs,
+    then batch-geolocate everything. Returns full path data for the map.
+    Accepts: {"ips": ["1.2.3.4", ...]}
+    Returns: {
+      "self_ip", "self_geo",
+      "targets": {ip: {"geo": {...}, "hops": [{hop, ip, rtt_ms, geo}, ...]}},
+    }
+    """
+    data = request.get_json(silent=True)
+    if not data or "ips" not in data:
+        return jsonify({"error": "POST body must contain 'ips' array"}), 400
+
+    raw_ips = data["ips"]
+    if not isinstance(raw_ips, list):
+        return jsonify({"error": "'ips' must be a list"}), 400
+
+    # Validate — only public IPs
+    valid_ips = []
+    for ip_str in raw_ips[:50]:  # cap at 50 targets
+        try:
+            addr = ipaddress.ip_address(str(ip_str).strip())
+            if not addr.is_private and not addr.is_loopback and not addr.is_link_local:
+                valid_ips.append(str(addr))
+        except ValueError:
+            continue
+
+    # 1. Run traceroutes sequentially (using cache — most will be instant)
+    all_traces = {}
+    all_hop_ips = set()
+    for ip in valid_ips:
+        cached = _trace_cache.get(ip)
+        if cached and (time.time() - cached["timestamp"]) < _trace_cache_ttl:
+            hops = cached["hops"]
+        else:
+            hops = _run_traceroute(ip, max_hops=15)
+            _trace_cache[ip] = {"hops": hops, "timestamp": time.time()}
+        all_traces[ip] = hops
+        for h in hops:
+            if h["ip"] and not h["timeout"]:
+                all_hop_ips.add(h["ip"])
+
+    # 2. Collect all IPs to geolocate (targets + hops)
+    all_ips_to_geo = set(valid_ips) | all_hop_ips
+    # Filter to public only
+    ips_for_lookup = []
+    for ip_str in all_ips_to_geo:
+        try:
+            addr = ipaddress.ip_address(ip_str)
+            if not addr.is_private and not addr.is_loopback and not addr.is_link_local:
+                ips_for_lookup.append(ip_str)
+        except ValueError:
+            continue
+
+    # 3. Batch geolocate — use cache, only look up uncached
+    geo_results = {}
+    to_lookup = []
+    for ip in ips_for_lookup:
+        if ip in _geo_cache:
+            geo_results[ip] = _geo_cache[ip]
+        else:
+            to_lookup.append(ip)
+
+    if to_lookup:
+        # ip-api.com batch supports 100 per request
+        for batch_start in range(0, len(to_lookup), 100):
+            batch = to_lookup[batch_start:batch_start + 100]
+            try:
+                batch_payload = [
+                    {"query": ip, "fields": "status,message,country,regionName,city,lat,lon,isp,org,as,query"}
+                    for ip in batch
+                ]
+                resp = http_requests.post(
+                    "http://ip-api.com/batch?fields=status,message,country,regionName,city,lat,lon,isp,org,as,query",
+                    json=batch_payload,
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    for entry in resp.json():
+                        if entry.get("status") == "success":
+                            ip = entry["query"]
+                            geo = {
+                                "lat": entry["lat"],
+                                "lon": entry["lon"],
+                                "city": entry.get("city", ""),
+                                "region": entry.get("regionName", ""),
+                                "country": entry.get("country", ""),
+                                "isp": entry.get("isp", ""),
+                                "org": entry.get("org", ""),
+                                "as": entry.get("as", ""),
+                            }
+                            _geo_cache[ip] = geo
+                            geo_results[ip] = geo
+            except Exception:
+                pass
+
+    # 4. Get self location
+    own_ip = None
+    own_geo = None
+    if "_self" in _geo_cache:
+        own_ip = _geo_cache["_self"]["ip"]
+        own_geo = _geo_cache["_self"]["geo"]
+    else:
+        try:
+            r = http_requests.get(
+                "http://ip-api.com/json/?fields=status,query,lat,lon,city,regionName,country,isp,org,as",
+                timeout=5,
+            )
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("status") == "success":
+                    own_ip = d["query"]
+                    own_geo = {
+                        "lat": d["lat"], "lon": d["lon"],
+                        "city": d.get("city", ""), "region": d.get("regionName", ""),
+                        "country": d.get("country", ""), "isp": d.get("isp", ""),
+                        "org": d.get("org", ""), "as": d.get("as", ""),
+                    }
+                    _geo_cache["_self"] = {"ip": own_ip, "geo": own_geo}
+        except Exception:
+            pass
+
+    # 5. Build response — targets with their trace hops annotated with geo
+    targets = {}
+    for ip in valid_ips:
+        hops_with_geo = []
+        for h in all_traces.get(ip, []):
+            hop_entry = {
+                "hop": h["hop"],
+                "ip": h["ip"],
+                "rtt_ms": h["rtt_ms"],
+                "timeout": h["timeout"],
+            }
+            if h["ip"] and h["ip"] in geo_results:
+                hop_entry["geo"] = geo_results[h["ip"]]
+            hops_with_geo.append(hop_entry)
+
+        targets[ip] = {
+            "geo": geo_results.get(ip),
+            "hops": hops_with_geo,
+        }
+
+    return jsonify({
+        "self_ip": own_ip,
+        "self_geo": own_geo,
+        "targets": targets,
+    })
+
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("  Digital Fingerprint Tracker")
+    print("  Local Privacy Awareness Dashboard")
+    print("  Open http://127.0.0.1:5000 in your browser")
+    print("=" * 60)
+    app.run(host="127.0.0.1", port=5000, debug=True)
