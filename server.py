@@ -5,6 +5,9 @@ All data stays local. Nothing is sent to external servers (except optional breac
 """
 
 import hashlib
+import email as email_lib
+import email.policy
+import imaplib
 import ipaddress
 import json
 import re
@@ -686,6 +689,7 @@ def _geolocate_ip(ip_str):
                 if provider["ok"](data):
                     geo = provider["parse"](data)
                     _geo_cache[ip_str] = geo
+                    _log("geo", f"{ip_str} → {geo.get('city','?')}, {geo.get('country','?')} via {provider['name']}")
                     return geo
         except Exception:
             continue
@@ -849,6 +853,167 @@ def trace_and_locate():
         "self_ip": own_ip,
         "self_geo": own_geo,
         "targets": targets,
+    })
+
+
+# ─── Server Console (ring-buffer log) ─────────────────────────────────
+_console_log = []           # list of {ts, level, msg}
+_console_max = 500
+
+
+def _log(level, msg):
+    """Append a timestamped entry to the in-memory server console."""
+    _console_log.append({"ts": time.time(), "level": level, "msg": msg})
+    if len(_console_log) > _console_max:
+        del _console_log[: len(_console_log) - _console_max]
+
+
+@app.after_request
+def _log_request(response):
+    """Log every request to the console buffer."""
+    if request.path.startswith("/api/console"):
+        return response  # don't log console polls
+    _log("req", f"{request.method} {request.path} → {response.status_code}")
+    return response
+
+
+@app.route("/api/console")
+def server_console():
+    """Return console log entries since a given timestamp (or last 100)."""
+    since = request.args.get("since", type=float, default=0)
+    entries = [e for e in _console_log if e["ts"] > since]
+    return jsonify({"entries": entries[-200:]})
+
+
+# ─── Email Header Trace ───────────────────────────────────────────────
+
+# Regex for IPv4 and IPv6 in Received: headers
+_IP_IN_HEADER_RE = re.compile(
+    r"\[?"
+    r"("
+    r"(?:(?:25[0-5]|2[0-4]\d|1?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|1?\d\d?)"
+    r"|"
+    r"(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}"
+    r")"
+    r"\]?"
+)
+
+
+def _extract_ips_from_headers(raw_headers):
+    """Parse Received: headers and extract public IPs in order."""
+    ips_seen = set()
+    ips_ordered = []
+    for match in _IP_IN_HEADER_RE.finditer(raw_headers):
+        ip_str = match.group(1)
+        try:
+            addr = ipaddress.ip_address(ip_str)
+            if addr.is_private or addr.is_loopback or addr.is_link_local:
+                continue
+            if ip_str not in ips_seen:
+                ips_seen.add(ip_str)
+                ips_ordered.append(ip_str)
+        except ValueError:
+            continue
+    return ips_ordered
+
+
+@app.route("/api/email-trace", methods=["POST"])
+def email_trace():
+    """
+    Connect to Gmail via IMAP, fetch recent emails, extract IPs from Received: headers,
+    geolocate them, and return structured data.
+    Accepts: {"email": "user@gmail.com", "app_password": "xxxx xxxx xxxx xxxx", "count": 20}
+    Credentials are used once for this request and never stored.
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    email_addr = (data.get("email") or "").strip()
+    app_password = (data.get("app_password") or "").strip()
+    count = min(int(data.get("count", 20)), 50)  # cap at 50
+
+    if not email_addr or not app_password:
+        return jsonify({"error": "Email and app password are required"}), 400
+
+    _log("info", f"Email trace: connecting to Gmail for {email_addr[:3]}***")
+
+    emails = []
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+        mail.login(email_addr, app_password)
+        mail.select("INBOX", readonly=True)
+
+        # Search for recent emails
+        status, msg_ids = mail.search(None, "ALL")
+        if status != "OK" or not msg_ids[0]:
+            mail.logout()
+            return jsonify({"error": "No emails found"}), 404
+
+        ids = msg_ids[0].split()
+        # Take the last N
+        ids = ids[-count:]
+
+        for mid in reversed(ids):
+            try:
+                status, msg_data = mail.fetch(mid, "(BODY[HEADER.FIELDS (FROM SUBJECT DATE RECEIVED)])")
+                if status != "OK":
+                    continue
+                raw = msg_data[0][1]
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8", errors="replace")
+
+                # Parse headers
+                msg = email_lib.message_from_string(raw, policy=email_lib.policy.default)
+                sender = str(msg.get("From", "unknown"))
+                subject = str(msg.get("Subject", "(no subject)"))
+                date = str(msg.get("Date", ""))
+
+                # Get all Received headers for IP extraction
+                status2, full_hdr = mail.fetch(mid, "(BODY[HEADER.FIELDS (RECEIVED)])")
+                received_raw = ""
+                if status2 == "OK" and full_hdr[0][1]:
+                    hdr_bytes = full_hdr[0][1]
+                    if isinstance(hdr_bytes, bytes):
+                        received_raw = hdr_bytes.decode("utf-8", errors="replace")
+
+                ips = _extract_ips_from_headers(received_raw)
+
+                emails.append({
+                    "from": sender,
+                    "subject": subject[:80],
+                    "date": date,
+                    "ips": ips,
+                })
+            except Exception:
+                continue
+
+        mail.logout()
+    except imaplib.IMAP4.error as e:
+        _log("error", f"Email trace IMAP error: {e}")
+        return jsonify({"error": f"IMAP login failed: {e}"}), 401
+    except Exception as e:
+        _log("error", f"Email trace error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+    # Collect all unique IPs
+    all_ips = []
+    seen = set()
+    for em in emails:
+        for ip in em["ips"]:
+            if ip not in seen:
+                seen.add(ip)
+                all_ips.append(ip)
+
+    # Geolocate all IPs
+    geo = _geolocate_batch(all_ips)
+
+    _log("info", f"Email trace: {len(emails)} emails, {len(all_ips)} unique IPs")
+
+    return jsonify({
+        "emails": emails,
+        "geo": geo,
+        "ip_count": len(all_ips),
     })
 
 

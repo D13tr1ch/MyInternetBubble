@@ -691,3 +691,120 @@ details pre {
     0%, 100% { opacity: 0.3; box-shadow: 0 0 0 0 rgba(210,153,34,0); }
     50% { opacity: 1; box-shadow: 0 0 6px 2px rgba(210,153,34,0.5); }
 }
+
+/* ─── Server Console ─────────────────────────────────────── */
+
+.console-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 0.75rem 0;
+    flex-wrap: wrap;
+}
+
+.console-autoscroll {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+}
+
+.console-autoscroll input { cursor: pointer; }
+
+.console-output {
+    background: #010409;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.6rem 0.8rem;
+    font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+    font-size: 0.78rem;
+    line-height: 1.55;
+    max-height: 360px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.console-line {
+    padding: 1px 0;
+    color: var(--text-muted);
+}
+
+.console-badge {
+    display: inline-block;
+    min-width: 5ch;
+    font-weight: 600;
+    margin-right: 0.5em;
+}
+
+.console-ts {
+    color: #484f58;
+    margin-right: 0.5em;
+}
+
+/* ─── Email Trace ────────────────────────────────────────── */
+
+.email-form {
+    display: flex;
+    gap: 0.75rem;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    margin: 0.75rem 0;
+}
+
+.email-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.email-field label {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.email-field input {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.4rem 0.6rem;
+    color: var(--text);
+    font-size: 0.85rem;
+    font-family: inherit;
+    min-width: 200px;
+}
+
+.email-field-count input {
+    min-width: 70px;
+    max-width: 80px;
+}
+
+.email-field input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.15);
+}
+
+.email-field small a {
+    color: var(--accent);
+    text-decoration: none;
+    font-size: 0.72rem;
+}
+
+.email-field small a:hover {
+    text-decoration: underline;
+}
+
+.email-results {
+    margin-top: 1rem;
+}
+
+.email-results h3 {
+    font-size: 0.95rem;
+    margin-bottom: 0.5rem;
+    color: var(--purple);
+}

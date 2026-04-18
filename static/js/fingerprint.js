@@ -373,6 +373,16 @@ const Dashboard = {
         if (typeof GeoMap !== 'undefined') {
             GeoMap.init('geo-map-section');
         }
+
+        // Init email trace
+        if (typeof EmailTrace !== 'undefined') {
+            EmailTrace.init('email-trace-section');
+        }
+
+        // Init server console
+        if (typeof ServerConsole !== 'undefined') {
+            ServerConsole.init('server-console-section');
+        }
     },
 
     _renderScoreCard() {
