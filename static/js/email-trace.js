@@ -8,6 +8,8 @@ const EmailTrace = {
     emails: [],
     geo: {},
     scanning: false,
+    _consolePollTimer: null,
+    _consoleSince: 0,
 
     init(containerId) {
         const container = document.getElementById(containerId);
@@ -24,15 +26,33 @@ const EmailTrace = {
                 <div class="email-field">
                     <label for="email-pass">App password</label>
                     <input type="password" id="email-pass" placeholder="xxxx xxxx xxxx xxxx" autocomplete="off" />
-                    <small><a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">Generate app password</a></small>
+                    <small>One-time use only — cleared after scan. <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">Generate app password</a></small>
                 </div>
                 <div class="email-field email-field-count">
-                    <label for="email-count">Emails to scan</label>
-                    <input type="number" id="email-count" value="20" min="1" max="50" />
+                    <label for="email-count">Max emails</label>
+                    <input type="number" id="email-count" value="50" min="1" max="200" />
+                </div>
+                <div class="email-field email-field-count">
+                    <label for="email-months">Lookback</label>
+                    <select id="email-months">
+                        <option value="1">1 month</option>
+                        <option value="3">3 months</option>
+                        <option value="6" selected>6 months</option>
+                        <option value="12">12 months</option>
+                    </select>
                 </div>
                 <button id="email-scan" class="map-btn map-btn-primary">Scan Emails</button>
                 <span id="email-status" class="map-status"></span>
             </div>
+            <div id="email-console" class="console-output email-console">
+<span class="console-line"><span class="console-badge" style="color:#d29922">INFO </span><span class="console-ts">--:--:--.---</span> Waiting for scan...</span>
+<span class="console-line"><span class="console-badge" style="color:#8b949e">EXAMPLE</span><span class="console-ts">12:34:56.789</span> Email trace: connecting to Gmail for use***</span>
+<span class="console-line"><span class="console-badge" style="color:#8b949e">EXAMPLE</span><span class="console-ts">12:34:57.320</span> Email trace: scanning INBOX (last 6mo, max 50)</span>
+<span class="console-line"><span class="console-badge" style="color:#8b949e">EXAMPLE</span><span class="console-ts">12:34:58.105</span> Email trace: scanning [Gmail]/Spam (last 6mo, max 50)</span>
+<span class="console-line"><span class="console-badge" style="color:#3fb950">GEO  </span><span class="console-ts">12:34:59.440</span> 209.85.220.41 → Mountain View, US via ipwho.is</span>
+<span class="console-line"><span class="console-badge" style="color:#3fb950">GEO  </span><span class="console-ts">12:35:00.112</span> 74.125.82.51 → Mountain View, US via ipapi.co</span>
+<span class="console-line"><span class="console-badge" style="color:#d29922">INFO </span><span class="console-ts">12:35:01.890</span> Email trace: 38 emails, 12 unique IPs</span>
+</div>
             <div id="email-results" class="email-results" style="display:none;"></div>
         `;
 
@@ -44,7 +64,8 @@ const EmailTrace = {
 
         const emailAddr = document.getElementById("email-addr").value.trim();
         const appPass = document.getElementById("email-pass").value.trim();
-        const count = parseInt(document.getElementById("email-count").value) || 20;
+        const count = parseInt(document.getElementById("email-count").value) || 50;
+        const months = parseInt(document.getElementById("email-months").value) || 6;
 
         if (!emailAddr || !appPass) {
             this._setStatus("Enter email and app password");
@@ -57,11 +78,17 @@ const EmailTrace = {
         btn.textContent = "Scanning...";
         this._setStatus("Connecting to Gmail...");
 
+        // Start live console for this scan
+        this._consoleSince = Date.now() / 1000 - 1;
+        this._clearConsole();
+        this._appendConsole("info", "Connecting to Gmail...");
+        this._startConsolePoll();
+
         try {
             const resp = await fetch("/api/email-trace", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ email: emailAddr, app_password: appPass, count }),
+                body: JSON.stringify({ email: emailAddr, app_password: appPass, count, months }),
             });
             const data = await resp.json();
 
@@ -82,12 +109,16 @@ const EmailTrace = {
 
         } catch (err) {
             this._setStatus(`Error: ${err.message}`);
+            this._appendConsole("error", err.message);
         } finally {
             this.scanning = false;
             btn.disabled = false;
             btn.textContent = "Scan Emails";
             // Clear password from DOM
             document.getElementById("email-pass").value = "";
+            // Final console poll then stop
+            await this._pollConsole();
+            this._stopConsolePoll();
         }
     },
 
@@ -110,6 +141,7 @@ const EmailTrace = {
             <tr>
                 <td class="label" style="font-weight:600">From</td>
                 <td style="font-weight:600">Subject</td>
+                <td style="font-weight:600">Folder</td>
                 <td style="font-weight:600">Origin IPs</td>
                 <td style="font-weight:600">Location</td>
             </tr>`;
@@ -127,9 +159,14 @@ const EmailTrace = {
                 }).join("<br>")
                 : "—";
 
+            const folder = em.folder === "spam"
+                ? `<span style="color:var(--red)">spam</span>`
+                : em.folder || "inbox";
+
             html += `<tr>
                 <td class="label" style="max-width:200px;overflow:hidden;text-overflow:ellipsis">${from}</td>
                 <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis">${subj}</td>
+                <td>${folder}</td>
                 <td>${ipCells}</td>
                 <td>${locCells}</td>
             </tr>`;
@@ -179,6 +216,54 @@ const EmailTrace = {
                 }).addTo(GeoMap.layerGroup);
             }
         }
+    },
+
+    // ─── Email Console helpers ───────────────────────────────
+
+    _clearConsole() {
+        const el = document.getElementById("email-console");
+        if (el) el.innerHTML = "";
+    },
+
+    _appendConsole(level, msg) {
+        const el = document.getElementById("email-console");
+        if (!el) return;
+        const colors = { req: "#58a6ff", geo: "#3fb950", info: "#d29922", error: "#f85149", email: "#bc8cff" };
+        const color = colors[level] || "#8b949e";
+        const t = new Date();
+        const ts = t.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        const ms = String(t.getMilliseconds()).padStart(3, "0");
+        const badge = `<span class="console-badge" style="color:${color}">${this._escapeHtml(level).toUpperCase().padEnd(5)}</span>`;
+        el.innerHTML += `<div class="console-line">${badge}<span class="console-ts">${ts}.${ms}</span> ${this._escapeHtml(msg)}</div>`;
+        el.scrollTop = el.scrollHeight;
+    },
+
+    _startConsolePoll() {
+        this._stopConsolePoll();
+        this._consolePollTimer = setInterval(() => this._pollConsole(), 800);
+    },
+
+    _stopConsolePoll() {
+        if (this._consolePollTimer) {
+            clearInterval(this._consolePollTimer);
+            this._consolePollTimer = null;
+        }
+    },
+
+    async _pollConsole() {
+        try {
+            const resp = await fetch(`/api/console?since=${this._consoleSince}`);
+            const data = await resp.json();
+            if (data.entries && data.entries.length > 0) {
+                for (const e of data.entries) {
+                    // Only show email/geo related entries
+                    if (e.msg.includes("Email trace") || e.msg.includes("email-trace") || e.level === "geo") {
+                        this._appendConsole(e.level, e.msg);
+                    }
+                    if (e.ts > this._consoleSince) this._consoleSince = e.ts;
+                }
+            }
+        } catch (err) { /* ignore */ }
     },
 
     _escapeHtml(text) {

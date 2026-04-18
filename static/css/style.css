@@ -783,6 +783,22 @@ details pre {
     max-width: 80px;
 }
 
+.email-field select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.4rem 0.6rem;
+    color: var(--text);
+    font-size: 0.85rem;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+.email-field select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
 .email-field input:focus {
     outline: none;
     border-color: var(--accent);
@@ -807,4 +823,10 @@ details pre {
     font-size: 0.95rem;
     margin-bottom: 0.5rem;
     color: var(--purple);
+}
+
+.email-console {
+    margin: 0.75rem 0;
+    max-height: 200px;
+    min-height: 100px;
 }

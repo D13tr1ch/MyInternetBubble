@@ -4,6 +4,7 @@ Runs a local Flask server that shows what your browser, network, and device expo
 All data stays local. Nothing is sent to external servers (except optional breach checks).
 """
 
+import datetime
 import hashlib
 import email as email_lib
 import email.policy
@@ -931,62 +932,72 @@ def email_trace():
 
     email_addr = (data.get("email") or "").strip()
     app_password = (data.get("app_password") or "").strip()
-    count = min(int(data.get("count", 20)), 50)  # cap at 50
+    count = min(int(data.get("count", 20)), 200)  # cap at 200
+    months = min(int(data.get("months", 1)), 12)  # 1-12 months lookback
 
     if not email_addr or not app_password:
         return jsonify({"error": "Email and app password are required"}), 400
 
-    _log("info", f"Email trace: connecting to Gmail for {email_addr[:3]}***")
+    # IMAP SINCE date — go back N months
+    since_date = datetime.date.today() - datetime.timedelta(days=months * 30)
+    since_str = since_date.strftime("%d-%b-%Y")  # e.g. "17-Oct-2025"
+
+    _log("info", f"Email trace: connecting to Gmail for {email_addr[:3]}*** (last {months}mo, max {count})")
 
     emails = []
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
         mail.login(email_addr, app_password)
-        mail.select("INBOX", readonly=True)
 
-        # Search for recent emails
-        status, msg_ids = mail.search(None, "ALL")
-        if status != "OK" or not msg_ids[0]:
-            mail.logout()
-            return jsonify({"error": "No emails found"}), 404
-
-        ids = msg_ids[0].split()
-        # Take the last N
-        ids = ids[-count:]
-
-        for mid in reversed(ids):
-            try:
-                status, msg_data = mail.fetch(mid, "(BODY[HEADER.FIELDS (FROM SUBJECT DATE RECEIVED)])")
-                if status != "OK":
-                    continue
-                raw = msg_data[0][1]
-                if isinstance(raw, bytes):
-                    raw = raw.decode("utf-8", errors="replace")
-
-                # Parse headers
-                msg = email_lib.message_from_string(raw, policy=email_lib.policy.default)
-                sender = str(msg.get("From", "unknown"))
-                subject = str(msg.get("Subject", "(no subject)"))
-                date = str(msg.get("Date", ""))
-
-                # Get all Received headers for IP extraction
-                status2, full_hdr = mail.fetch(mid, "(BODY[HEADER.FIELDS (RECEIVED)])")
-                received_raw = ""
-                if status2 == "OK" and full_hdr[0][1]:
-                    hdr_bytes = full_hdr[0][1]
-                    if isinstance(hdr_bytes, bytes):
-                        received_raw = hdr_bytes.decode("utf-8", errors="replace")
-
-                ips = _extract_ips_from_headers(received_raw)
-
-                emails.append({
-                    "from": sender,
-                    "subject": subject[:80],
-                    "date": date,
-                    "ips": ips,
-                })
-            except Exception:
+        folders = [("INBOX", "inbox"), ("[Gmail]/Spam", "spam")]
+        for folder_name, folder_label in folders:
+            status, _ = mail.select(folder_name, readonly=True)
+            if status != "OK":
+                _log("info", f"Email trace: {folder_name} not available, skipping")
                 continue
+
+            status, msg_ids = mail.search(None, f'(SINCE {since_str})')
+            if status != "OK" or not msg_ids[0]:
+                _log("info", f"Email trace: no emails in {folder_name} since {since_str}")
+                continue
+
+            ids = msg_ids[0].split()
+            total_in_folder = len(ids)
+            ids = ids[-count:]
+            _log("info", f"Email trace: scanning {folder_name} — {total_in_folder} total, fetching last {len(ids)}")
+
+            for mid in reversed(ids):
+                try:
+                    status, msg_data = mail.fetch(mid, "(BODY[HEADER.FIELDS (FROM SUBJECT DATE RECEIVED)])")
+                    if status != "OK":
+                        continue
+                    raw = msg_data[0][1]
+                    if isinstance(raw, bytes):
+                        raw = raw.decode("utf-8", errors="replace")
+
+                    msg = email_lib.message_from_string(raw, policy=email_lib.policy.default)
+                    sender = str(msg.get("From", "unknown"))
+                    subject = str(msg.get("Subject", "(no subject)"))
+                    date = str(msg.get("Date", ""))
+
+                    status2, full_hdr = mail.fetch(mid, "(BODY[HEADER.FIELDS (RECEIVED)])")
+                    received_raw = ""
+                    if status2 == "OK" and full_hdr[0][1]:
+                        hdr_bytes = full_hdr[0][1]
+                        if isinstance(hdr_bytes, bytes):
+                            received_raw = hdr_bytes.decode("utf-8", errors="replace")
+
+                    ips = _extract_ips_from_headers(received_raw)
+
+                    emails.append({
+                        "from": sender,
+                        "subject": subject[:80],
+                        "date": date,
+                        "ips": ips,
+                        "folder": folder_label,
+                    })
+                except Exception:
+                    continue
 
         mail.logout()
     except imaplib.IMAP4.error as e:
@@ -1005,6 +1016,7 @@ def email_trace():
                 seen.add(ip)
                 all_ips.append(ip)
 
+    _log("info", f"Email trace: geolocating {len(all_ips)} unique IPs...")
     # Geolocate all IPs
     geo = _geolocate_batch(all_ips)
 
