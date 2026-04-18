@@ -383,6 +383,11 @@ const Dashboard = {
         if (typeof ServerConsole !== 'undefined') {
             ServerConsole.init('server-console-section');
         }
+
+        // Init server controls
+        if (typeof ServerControls !== 'undefined') {
+            ServerControls.init('server-controls-section');
+        }
     },
 
     _renderScoreCard() {

@@ -1029,6 +1029,96 @@ def email_trace():
     })
 
 
+# ─── Server Controls ──────────────────────────────────────────────────
+
+import os
+import sys
+import signal
+import shutil
+
+_server_start_time = time.time()
+_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+@app.route("/api/server/status")
+def server_status():
+    """Return server uptime, port, version, and PID."""
+    uptime = time.time() - _server_start_time
+    return jsonify({
+        "uptime": uptime,
+        "pid": os.getpid(),
+        "port": 5000,
+        "project_dir": _PROJECT_DIR,
+        "python": sys.executable,
+    })
+
+
+@app.route("/api/server/restart", methods=["POST"])
+def server_restart():
+    """Restart the Flask server by re-executing the current process."""
+    _log("info", "Server restart requested — restarting...")
+
+    def _restart():
+        time.sleep(0.5)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    import threading
+    threading.Thread(target=_restart, daemon=True).start()
+    return jsonify({"status": "restarting"})
+
+
+@app.route("/api/server/stop", methods=["POST"])
+def server_stop():
+    """Gracefully shut down the Flask server."""
+    _log("info", "Server shutdown requested — stopping...")
+
+    def _shutdown():
+        time.sleep(0.5)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    import threading
+    threading.Thread(target=_shutdown, daemon=True).start()
+    return jsonify({"status": "stopping"})
+
+
+@app.route("/api/server/uninstall", methods=["POST"])
+def server_uninstall():
+    """
+    Stop the server and delete the entire project directory.
+    This is irreversible — writes a self-destruct script that runs after the process exits.
+    """
+    data = request.get_json(silent=True)
+    if not data or data.get("confirm") != "UNINSTALL":
+        return jsonify({"error": "Send {\"confirm\": \"UNINSTALL\"} to confirm"}), 400
+
+    _log("info", "UNINSTALL requested — server will stop and project will be deleted")
+
+    # Write a small batch script that waits for this process to exit, then deletes the folder
+    cleanup_bat = os.path.join(os.environ.get("TEMP", "."), "dft_uninstall.bat")
+    with open(cleanup_bat, "w") as f:
+        f.write(f'@echo off\n')
+        f.write(f'echo Waiting for server to exit...\n')
+        f.write(f'timeout /t 3 /nobreak >nul\n')
+        f.write(f'echo Removing {_PROJECT_DIR}...\n')
+        f.write(f'rmdir /s /q "{_PROJECT_DIR}"\n')
+        f.write(f'echo Digital Fingerprint Tracker has been uninstalled.\n')
+        f.write(f'del "%~f0"\n')  # self-delete the batch file
+
+    def _uninstall():
+        time.sleep(0.5)
+        subprocess.Popen(
+            ["cmd", "/c", cleanup_bat],
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+            close_fds=True,
+        )
+        time.sleep(0.3)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    import threading
+    threading.Thread(target=_uninstall, daemon=True).start()
+    return jsonify({"status": "uninstalling"})
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("  Digital Fingerprint Tracker")
