@@ -67,6 +67,7 @@ const NetworkMap = {
                 <span id="map-status" class="map-status">Ready</span>
                 <div class="map-legend" id="map-legend"></div>
             </div>
+            <div id="registry-pulse" class="registry-pulse" style="display:none;"></div>
             <div class="map-wrapper" id="map-wrapper">
                 <canvas id="network-canvas"></canvas>
                 <div id="map-tooltip" class="map-tooltip" style="display:none;"></div>
@@ -251,6 +252,7 @@ const NetworkMap = {
                 (this.monitoring ? " \u2014 monitoring" : "")
             );
 
+            this._renderRegistryPulse(data.registry_pulses || []);
             this._resolveHostnames();
         } catch (err) {
             this._setStatus(`Error: ${err.message}`);
@@ -787,5 +789,32 @@ const NetworkMap = {
                 if (node) this._traceRoute(node);
             });
         });
+    },
+
+    _renderRegistryPulse(pulses) {
+        const el = document.getElementById("registry-pulse");
+        if (!el) return;
+        if (!pulses || pulses.length === 0) {
+            el.style.display = "none";
+            return;
+        }
+        // Group by hostname
+        const byHost = {};
+        for (const p of pulses) {
+            const key = p.hostname || p.ip;
+            if (!byHost[key]) byHost[key] = [];
+            byHost[key].push(p);
+        }
+        const badges = Object.entries(byHost).map(([host, conns]) => {
+            const procs = [...new Set(conns.map(c => c.process))].join(", ");
+            return `<span class="pulse-badge" title="${conns.length} connection(s) via ${procs}">` +
+                `<span class="pulse-dot"></span>${host}</span>`;
+        }).join("");
+        el.innerHTML = `<span class="pulse-label">Registry</span>${badges}`;
+        el.style.display = "flex";
+        // Auto-fade after 3 seconds
+        el.classList.remove("pulse-fade");
+        void el.offsetWidth; // reflow
+        el.classList.add("pulse-fade");
     }
 };

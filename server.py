@@ -163,8 +163,13 @@ def network_connections():
     Returns a graph-friendly structure of nodes and edges.
     """
     connections = _get_tcp_connections()
-    nodes, edges = _build_connection_graph(connections)
-    return jsonify({"nodes": nodes, "edges": edges, "connection_count": len(connections)})
+    nodes, edges, registry_pulses = _build_connection_graph(connections)
+    return jsonify({
+        "nodes": nodes,
+        "edges": edges,
+        "connection_count": len(connections),
+        "registry_pulses": registry_pulses,
+    })
 
 
 @app.route("/api/resolve-host")
@@ -368,9 +373,27 @@ def _build_connection_graph(connections):
     """
     Build a graph of nodes (IPs/processes) and edges (connections)
     suitable for the frontend visualization.
+    Registry connections (GeoIP providers) are separated out with a pulse counter.
     """
     nodes_map = {}
     edges = []
+    registry_pulses = []  # list of {ip, hostname, port, process, timestamp}
+
+    # Resolve IPs to hostnames to identify registry hosts
+    _registry_ip_cache = {}
+
+    def _is_registry_ip(ip_str):
+        if ip_str in _registry_ip_cache:
+            return _registry_ip_cache[ip_str]
+        hostname = _resolve_hostname(ip_str)
+        if hostname:
+            # Check if any registry host matches the resolved hostname
+            for rh in _REGISTRY_HOSTS:
+                if hostname == rh or hostname.endswith("." + rh):
+                    _registry_ip_cache[ip_str] = hostname
+                    return hostname
+        _registry_ip_cache[ip_str] = None
+        return None
 
     # Add local machine as central node
     hostname = socket.gethostname()
@@ -388,6 +411,19 @@ def _build_connection_graph(connections):
         remote_groups[conn["remote_address"]].append(conn)
 
     for remote_ip, conns in remote_groups.items():
+        # Check if this IP is a registry host
+        reg_host = _is_registry_ip(remote_ip)
+        if reg_host:
+            for c in conns:
+                registry_pulses.append({
+                    "ip": remote_ip,
+                    "hostname": reg_host,
+                    "port": c["remote_port"],
+                    "process": c["process"],
+                    "state": c["state"],
+                })
+            continue  # Exclude from main graph
+
         node_id = f"remote_{remote_ip}"
         ip_class = _classify_ip(remote_ip)
 
@@ -435,7 +471,7 @@ def _build_connection_graph(connections):
         }
 
     nodes = list(nodes_map.values())
-    return nodes, edges
+    return nodes, edges, registry_pulses
 
 
 def _get_recommendations(data):
@@ -569,8 +605,60 @@ _geo_providers = [
             "as": "",
         },
     },
+    {
+        "name": "ipinfo.io",
+        "url": "https://ipinfo.io/{ip}/json",
+        "ok": lambda d: "loc" in d and not d.get("error"),
+        "parse": lambda d: {
+            "lat": float(d.get("loc", "0,0").split(",")[0]),
+            "lon": float(d.get("loc", "0,0").split(",")[1]),
+            "city": d.get("city", ""),
+            "region": d.get("region", ""),
+            "country": d.get("country", ""),
+            "isp": d.get("org", ""),
+            "org": d.get("org", ""),
+            "as": d.get("org", ""),
+        },
+    },
+    {
+        "name": "ipbase.com",
+        "url": "https://api.ipbase.com/v1/json/{ip}",
+        "ok": lambda d: "latitude" in d or ("location" in d and "latitude" in d.get("location", {})),
+        "parse": lambda d: {
+            "lat": d.get("latitude") or d.get("location", {}).get("latitude", 0),
+            "lon": d.get("longitude") or d.get("location", {}).get("longitude", 0),
+            "city": d.get("city") or d.get("location", {}).get("city", {}).get("name", ""),
+            "region": d.get("region_name", ""),
+            "country": d.get("country_name") or d.get("location", {}).get("country", {}).get("name", ""),
+            "isp": d.get("isp", ""),
+            "org": d.get("organization", ""),
+            "as": "",
+        },
+    },
+    {
+        "name": "reallyfreegeoip.org",
+        "url": "https://reallyfreegeoip.org/json/{ip}",
+        "ok": lambda d: "latitude" in d,
+        "parse": lambda d: {
+            "lat": d.get("latitude", 0),
+            "lon": d.get("longitude", 0),
+            "city": d.get("city", ""),
+            "region": d.get("region_name", ""),
+            "country": d.get("country_name", ""),
+            "isp": "",
+            "org": "",
+            "as": "",
+        },
+    },
 ]
 _geo_rr_index = 0
+
+# Hostnames of GeoIP registries the dashboard contacts — used to tag connections
+_REGISTRY_HOSTS = {
+    "ipwho.is", "ipapi.co", "freeipapi.com", "ipinfo.io",
+    "api.ipbase.com", "ipbase.com", "reallyfreegeoip.org",
+    "api.ipify.org", "ipify.org",
+}
 
 
 def _geolocate_ip(ip_str):
