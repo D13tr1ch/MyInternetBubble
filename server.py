@@ -379,21 +379,8 @@ def _build_connection_graph(connections):
     edges = []
     registry_pulses = []  # list of {ip, hostname, port, process, timestamp}
 
-    # Resolve IPs to hostnames to identify registry hosts
-    _registry_ip_cache = {}
-
-    def _is_registry_ip(ip_str):
-        if ip_str in _registry_ip_cache:
-            return _registry_ip_cache[ip_str]
-        hostname = _resolve_hostname(ip_str)
-        if hostname:
-            # Check if any registry host matches the resolved hostname
-            for rh in _REGISTRY_HOSTS:
-                if hostname == rh or hostname.endswith("." + rh):
-                    _registry_ip_cache[ip_str] = hostname
-                    return hostname
-        _registry_ip_cache[ip_str] = None
-        return None
+    # Ensure registry IPs are resolved (fast after first call)
+    _resolve_registry_ips()
 
     # Add local machine as central node
     hostname = socket.gethostname()
@@ -411,8 +398,8 @@ def _build_connection_graph(connections):
         remote_groups[conn["remote_address"]].append(conn)
 
     for remote_ip, conns in remote_groups.items():
-        # Check if this IP is a registry host
-        reg_host = _is_registry_ip(remote_ip)
+        # Check if this IP belongs to a GeoIP registry (fast dict lookup)
+        reg_host = _registry_ip_map.get(remote_ip)
         if reg_host:
             for c in conns:
                 registry_pulses.append({
@@ -659,6 +646,26 @@ _REGISTRY_HOSTS = {
     "api.ipbase.com", "ipbase.com", "reallyfreegeoip.org",
     "api.ipify.org", "ipify.org",
 }
+
+# Resolved IP -> hostname map for fast matching (populated lazily)
+_registry_ip_map = {}       # ip_str -> hostname
+_registry_ips_resolved = False
+
+
+def _resolve_registry_ips():
+    """Resolve all registry hostnames to IPs once. Called lazily on first use."""
+    global _registry_ips_resolved
+    if _registry_ips_resolved:
+        return
+    for host in _REGISTRY_HOSTS:
+        try:
+            infos = socket.getaddrinfo(host, 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            for info in infos:
+                ip = info[4][0]
+                _registry_ip_map[ip] = host
+        except (socket.gaierror, OSError):
+            pass
+    _registry_ips_resolved = True
 
 
 def _geolocate_ip(ip_str):
