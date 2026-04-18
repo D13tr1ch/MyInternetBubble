@@ -289,7 +289,7 @@ def _get_tcp_connections():
             text=True,
             timeout=20,
         )
-        if result.returncode == 0 and result.stdout.strip():
+        if result.stdout.strip():
             data = json.loads(result.stdout)
             if isinstance(data, dict):
                 data = [data]
