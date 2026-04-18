@@ -198,6 +198,15 @@ body {
     color: var(--purple);
 }
 
+.hop-table {
+    background: rgba(0,0,0,0.2);
+    border-radius: 0;
+}
+.hop-table td {
+    padding: 0.15rem 0.4rem;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+
 .mono {
     font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
     font-size: 0.8rem;

@@ -346,8 +346,10 @@ const GeoMap = {
             const rttStr = hop.rtt_ms != null ? `${hop.rtt_ms}ms` : (hop.timeout ? "timeout" : "?");
             const label = hop.ip || "*";
             const locStr = hasGeo ? `${g.city || ""}, ${g.country || ""}` : (hop.timeout ? "timeout" : "private/unknown");
+            const svcStr = hasGeo ? (g.isp || g.org || g.as || "") : "";
             hm.bindTooltip(
-                `Hop ${hop.hop}: ${label} (${rttStr})<br>${locStr}`,
+                `Hop ${hop.hop}: ${label} (${rttStr})<br>${locStr}` +
+                (svcStr ? `<br><em>${svcStr}</em>` : ""),
                 { direction: "top", offset: [0, -5] }
             );
         }
@@ -435,6 +437,30 @@ const GeoMap = {
                 <td>${hopsCol}</td>
                 <td>${count}</td>
             </tr>`;
+
+            // Hop detail rows
+            if (td && td.hops.length > 0) {
+                html += `<tr><td colspan="6" style="padding:0;"><table class="fp-table hop-table" style="margin:0;width:100%;border:none;">
+                    <tr style="font-size:0.7rem;color:var(--text-muted);">
+                        <td>#</td><td>IP</td><td>RTT</td><td>Location</td><td colspan="2">Service / ISP</td>
+                    </tr>`;
+                for (const hop of td.hops) {
+                    const hg = hop.ip ? td.hopGeo[hop.ip] : null;
+                    const hopIp = hop.ip || "*";
+                    const rtt = hop.rtt_ms != null ? `${hop.rtt_ms}ms` : (hop.timeout ? "timeout" : "?");
+                    const loc = hg ? `${hg.city || ""}, ${hg.country || ""}` : (hop.timeout ? "\u2014" : "private");
+                    const svc = hg ? (hg.isp || hg.org || hg.as || "\u2014") : "\u2014";
+                    const rowColor = hg ? "var(--text)" : "var(--text-muted)";
+                    html += `<tr style="font-size:0.75rem;color:${rowColor};">
+                        <td>${hop.hop}</td>
+                        <td class="mono">${hopIp}</td>
+                        <td>${rtt}</td>
+                        <td>${loc}</td>
+                        <td colspan="2">${svc}</td>
+                    </tr>`;
+                }
+                html += `</table></td></tr>`;
+            }
         }
 
         html += `</table></div>`;
