@@ -311,6 +311,16 @@ const FingerprintCollector = {
     }
 };
 
+function escapeHtml(value) {
+    const s = String(value ?? "");
+    return s
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
 // ----- Dashboard Controller -----
 const Dashboard = {
 
@@ -340,8 +350,14 @@ const Dashboard = {
 
             this._render();
         } catch (err) {
-            document.getElementById("app").innerHTML =
-                `<div class="error">Failed to collect fingerprint data: ${err.message}</div>`;
+            const app = document.getElementById("app");
+            if (app) {
+                app.textContent = "";
+                const box = document.createElement("div");
+                box.className = "error";
+                box.textContent = `Failed to collect fingerprint data: ${err?.message || "unknown error"}`;
+                app.appendChild(box);
+            }
         } finally {
             this._showLoading(false);
         }
@@ -397,14 +413,14 @@ const Dashboard = {
 
         el.innerHTML = `
             <div class="score-circle ${scoreClass}">
-                <span class="score-number">${s.uniqueness_score}</span>
+                <span class="score-number">${escapeHtml(s.uniqueness_score)}</span>
                 <span class="score-label">/ 100</span>
             </div>
             <div class="score-info">
-                <h2>Trackability: <span class="${scoreClass}">${s.rating}</span></h2>
-                <p>${s.advice}</p>
-                <p class="hash">Master Fingerprint: <code>${s.master_fingerprint_hash.substring(0, 32)}...</code></p>
-                <p class="meta">${s.component_count} unique data points collected</p>
+                <h2>Trackability: <span class="${scoreClass}">${escapeHtml(s.rating)}</span></h2>
+                <p>${escapeHtml(s.advice)}</p>
+                <p class="hash">Master Fingerprint: <code>${escapeHtml(String(s.master_fingerprint_hash || "").substring(0, 32))}...</code></p>
+                <p class="meta">${escapeHtml(s.component_count)} unique data points collected</p>
             </div>
         `;
     },
@@ -448,17 +464,17 @@ const Dashboard = {
 
         el.innerHTML = `<h2>Browser & Device Fingerprint</h2>` +
             `<table class="fp-table">` +
-            rows.map(([k, v]) => `<tr><td class="label">${k}</td><td>${v}</td></tr>`).join("") +
+            rows.map(([k, v]) => `<tr><td class="label">${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`).join("") +
             `</table>`;
 
         // Fonts detail
         if (d.fonts.length > 0) {
-            el.innerHTML += `<details><summary>Detected Fonts (${d.fonts.length})</summary><div class="tag-list">${d.fonts.map(f => `<span class="tag">${f}</span>`).join("")}</div></details>`;
+            el.innerHTML += `<details><summary>Detected Fonts (${d.fonts.length})</summary><div class="tag-list">${d.fonts.map(f => `<span class="tag">${escapeHtml(f)}</span>`).join("")}</div></details>`;
         }
 
         // WebRTC leaks
         if (d.webrtcLeaks && d.webrtcLeaks.length > 0) {
-            el.innerHTML += `<div class="warning-box"><strong>⚠ WebRTC IP Leak:</strong> ${d.webrtcLeaks.join(", ")}</div>`;
+            el.innerHTML += `<div class="warning-box"><strong>⚠ WebRTC IP Leak:</strong> ${escapeHtml(d.webrtcLeaks.join(", "))}</div>`;
         }
     },
 
@@ -480,7 +496,7 @@ const Dashboard = {
         if (d.privacy_flags.length > 0) {
             html += `<div class="flags-section"><h3>Privacy Flags</h3><ul>`;
             for (const flag of d.privacy_flags) {
-                html += `<li class="flag-item">⚠ ${flag}</li>`;
+                html += `<li class="flag-item">⚠ ${escapeHtml(flag)}</li>`;
             }
             html += `</ul></div>`;
         }
@@ -589,9 +605,9 @@ const Dashboard = {
         for (const rec of recs) {
             html += `
                 <div class="rec-card">
-                    <span class="rec-category">${rec.category}</span>
-                    <p class="rec-issue">${rec.issue}</p>
-                    <p class="rec-action">→ ${rec.action}</p>
+                    <span class="rec-category">${escapeHtml(rec.category)}</span>
+                    <p class="rec-issue">${escapeHtml(rec.issue)}</p>
+                    <p class="rec-action">→ ${escapeHtml(rec.action)}</p>
                 </div>
             `;
         }
@@ -605,15 +621,15 @@ const Dashboard = {
             <h2>Raw Fingerprint Data</h2>
             <details>
                 <summary>Browser Data (JSON)</summary>
-                <pre>${JSON.stringify(this.browserData, null, 2)}</pre>
+                <pre>${escapeHtml(JSON.stringify(this.browserData, null, 2))}</pre>
             </details>
             <details>
                 <summary>Network Data (JSON)</summary>
-                <pre>${JSON.stringify(this.networkData, null, 2)}</pre>
+                <pre>${escapeHtml(JSON.stringify(this.networkData, null, 2))}</pre>
             </details>
             <details>
                 <summary>Summary Data (JSON)</summary>
-                <pre>${JSON.stringify(this.summaryData, null, 2)}</pre>
+                <pre>${escapeHtml(JSON.stringify(this.summaryData, null, 2))}</pre>
             </details>
         `;
     }

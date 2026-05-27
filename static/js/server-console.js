@@ -101,14 +101,31 @@ const ServerConsole = {
 
         // Only render the last maxDisplay entries
         const visible = this.entries.slice(-this.maxDisplay);
-        output.innerHTML = visible.map(e => {
+        output.textContent = "";
+        const fragment = document.createDocumentFragment();
+        for (const e of visible) {
             const t = new Date(e.ts * 1000);
             const ts = t.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
             const ms = String(t.getMilliseconds()).padStart(3, "0");
             const color = levelColors[e.level] || "#8b949e";
-            const badge = `<span class="console-badge" style="color:${color}">${e.level.toUpperCase().padEnd(5)}</span>`;
-            return `<div class="console-line">${badge}<span class="console-ts">${ts}.${ms}</span> ${this._escapeHtml(e.msg)}</div>`;
-        }).join("");
+            const line = document.createElement("div");
+            line.className = "console-line";
+
+            const badge = document.createElement("span");
+            badge.className = "console-badge";
+            badge.style.color = color;
+            badge.textContent = e.level.toUpperCase().padEnd(5);
+
+            const tsEl = document.createElement("span");
+            tsEl.className = "console-ts";
+            tsEl.textContent = `${ts}.${ms}`;
+
+            line.appendChild(badge);
+            line.appendChild(tsEl);
+            line.appendChild(document.createTextNode(` ${e.msg}`));
+            fragment.appendChild(line);
+        }
+        output.appendChild(fragment);
 
         // Auto-scroll
         const autoScroll = document.getElementById("console-autoscroll");

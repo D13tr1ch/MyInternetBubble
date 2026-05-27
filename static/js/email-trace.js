@@ -136,44 +136,84 @@ const EmailTrace = {
             return;
         }
 
-        let html = `<h3>Email Origins</h3>
-            <div class="conn-table-wrap"><table class="fp-table">
-            <tr>
-                <td class="label" style="font-weight:600">From</td>
-                <td style="font-weight:600">Subject</td>
-                <td style="font-weight:600">Folder</td>
-                <td style="font-weight:600">Origin IPs</td>
-                <td style="font-weight:600">Location</td>
-            </tr>`;
+        container.textContent = "";
+        const title = document.createElement("h3");
+        title.textContent = "Email Origins";
+        container.appendChild(title);
+
+        const wrap = document.createElement("div");
+        wrap.className = "conn-table-wrap";
+        const table = document.createElement("table");
+        table.className = "fp-table";
+
+        const head = document.createElement("tr");
+        ["From", "Subject", "Folder", "Origin IPs", "Location"].forEach((label, idx) => {
+            const cell = document.createElement("td");
+            if (idx === 0) cell.className = "label";
+            cell.style.fontWeight = "600";
+            cell.textContent = label;
+            head.appendChild(cell);
+        });
+        table.appendChild(head);
 
         for (const em of this.emails) {
-            const from = this._escapeHtml(em.from);
-            const subj = this._escapeHtml(em.subject);
-            const ipCells = em.ips.length > 0
-                ? em.ips.map(ip => `<span class="mono">${ip}</span>`).join("<br>")
-                : '<span style="color:var(--text-muted)">none</span>';
-            const locCells = em.ips.length > 0
-                ? em.ips.map(ip => {
+            const tr = document.createElement("tr");
+
+            const fromTd = document.createElement("td");
+            fromTd.className = "label";
+            fromTd.style.maxWidth = "200px";
+            fromTd.style.overflow = "hidden";
+            fromTd.style.textOverflow = "ellipsis";
+            fromTd.textContent = em.from || "";
+            tr.appendChild(fromTd);
+
+            const subjTd = document.createElement("td");
+            subjTd.style.maxWidth = "250px";
+            subjTd.style.overflow = "hidden";
+            subjTd.style.textOverflow = "ellipsis";
+            subjTd.textContent = em.subject || "";
+            tr.appendChild(subjTd);
+
+            const folderTd = document.createElement("td");
+            folderTd.textContent = em.folder === "spam" ? "spam" : (em.folder || "inbox");
+            tr.appendChild(folderTd);
+
+            const ipTd = document.createElement("td");
+            if (em.ips.length > 0) {
+                em.ips.forEach((ip, index) => {
+                    const span = document.createElement("span");
+                    span.className = "mono";
+                    span.textContent = ip;
+                    ipTd.appendChild(span);
+                    if (index < em.ips.length - 1) ipTd.appendChild(document.createElement("br"));
+                });
+            } else {
+                const none = document.createElement("span");
+                none.style.color = "var(--text-muted)";
+                none.textContent = "none";
+                ipTd.appendChild(none);
+            }
+            tr.appendChild(ipTd);
+
+            const locTd = document.createElement("td");
+            if (em.ips.length > 0) {
+                em.ips.forEach((ip, index) => {
                     const g = this.geo[ip];
-                    return g ? `${g.city}, ${g.country}` : "—";
-                }).join("<br>")
-                : "—";
+                    const span = document.createElement("span");
+                    span.textContent = g ? `${g.city}, ${g.country}` : "—";
+                    locTd.appendChild(span);
+                    if (index < em.ips.length - 1) locTd.appendChild(document.createElement("br"));
+                });
+            } else {
+                locTd.textContent = "—";
+            }
+            tr.appendChild(locTd);
 
-            const folder = em.folder === "spam"
-                ? `<span style="color:var(--red)">spam</span>`
-                : em.folder || "inbox";
-
-            html += `<tr>
-                <td class="label" style="max-width:200px;overflow:hidden;text-overflow:ellipsis">${from}</td>
-                <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis">${subj}</td>
-                <td>${folder}</td>
-                <td>${ipCells}</td>
-                <td>${locCells}</td>
-            </tr>`;
+            table.appendChild(tr);
         }
 
-        html += `</table></div>`;
-        container.innerHTML = html;
+        wrap.appendChild(table);
+        container.appendChild(wrap);
         container.style.display = "block";
     },
 
@@ -233,8 +273,22 @@ const EmailTrace = {
         const t = new Date();
         const ts = t.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
         const ms = String(t.getMilliseconds()).padStart(3, "0");
-        const badge = `<span class="console-badge" style="color:${color}">${this._escapeHtml(level).toUpperCase().padEnd(5)}</span>`;
-        el.innerHTML += `<div class="console-line">${badge}<span class="console-ts">${ts}.${ms}</span> ${this._escapeHtml(msg)}</div>`;
+        const line = document.createElement("div");
+        line.className = "console-line";
+
+        const badge = document.createElement("span");
+        badge.className = "console-badge";
+        badge.style.color = color;
+        badge.textContent = level.toUpperCase().padEnd(5);
+
+        const tsEl = document.createElement("span");
+        tsEl.className = "console-ts";
+        tsEl.textContent = `${ts}.${ms}`;
+
+        line.appendChild(badge);
+        line.appendChild(tsEl);
+        line.appendChild(document.createTextNode(` ${msg}`));
+        el.appendChild(line);
         el.scrollTop = el.scrollHeight;
     },
 

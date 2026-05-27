@@ -11,6 +11,7 @@ import email.policy
 import imaplib
 import ipaddress
 import json
+import shutil
 import re
 import socket
 import struct
@@ -215,68 +216,30 @@ def traceroute():
     _trace_active += 1
     try:
         hops = _run_traceroute(ip)
-        _trace_cache[ip] = {"hops": hops, "timestamp": time.time()}
+        if hops:
+            _trace_cache[ip] = {"hops": hops, "timestamp": time.time()}
+        else:
+            _trace_cache.pop(ip, None)
         return jsonify({"ip": ip, "hops": hops, "cached": False})
     finally:
         _trace_active -= 1
 
 
 def _run_traceroute(target_ip, max_hops=15):
-    """Run tracert on Windows and parse the output into hop list."""
-    hops = []
-    try:
-        result = subprocess.run(
-            ["tracert", "-d", "-w", "1000", "-h", str(max_hops), target_ip],
-            capture_output=True,
-            text=True,
-            timeout=45,
-        )
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line or line.startswith("Tracing") or line.startswith("Trace") or line.startswith("over"):
-                continue
-            parts = line.split()
-            if not parts or not parts[0].isdigit():
-                continue
-            hop_num = int(parts[0])
-            hop_ip = None
-            for part in reversed(parts):
-                try:
-                    ipaddress.ip_address(part)
-                    hop_ip = part
-                    break
-                except ValueError:
-                    continue
-            rtts = []
-            for part in parts[1:]:
-                if part == "*":
-                    rtts.append(None)
-                elif part == "<1":
-                    rtts.append(0.5)
-                else:
-                    try:
-                        val = float(part)
-                        rtts.append(val)
-                    except ValueError:
-                        pass
-            avg_rtt = None
-            valid_rtts = [r for r in rtts if r is not None]
-            if valid_rtts:
-                avg_rtt = round(sum(valid_rtts) / len(valid_rtts), 1)
-            hops.append({
-                "hop": hop_num,
-                "ip": hop_ip,
-                "rtt_ms": avg_rtt,
-                "timeout": hop_ip is None,
-                "group": _classify_ip(hop_ip) if hop_ip else "unknown",
-            })
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-    return hops
+    """Traceroute is disabled to keep the dashboard shell-free and local-only."""
+    return []
 
 
 def _get_tcp_connections():
-    """Get active TCP connections with process names in a single PowerShell call."""
+    """Get active TCP connections with process names from Windows or Linux/macOS."""
+    windows_conns = _get_tcp_connections_windows()
+    if windows_conns:
+        return windows_conns
+    return _get_tcp_connections_posix()
+
+
+def _get_tcp_connections_windows():
+    """Get active TCP connections with process names using PowerShell."""
     connections = []
     try:
         # Single batched call: join connection data with process names
@@ -320,6 +283,180 @@ def _get_tcp_connections():
     except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
         pass
     return connections
+
+
+def _get_tcp_connections_posix():
+    """Get active TCP connections on Linux/macOS via ss or netstat."""
+    connections = _get_tcp_connections_from_ss()
+    if connections:
+        return connections
+    return _get_tcp_connections_from_netstat()
+
+
+def _get_tcp_connections_from_ss():
+    """Parse `ss` output for active/listening TCP connections."""
+    connections = []
+    if shutil.which("ss") is None:
+        return connections
+    try:
+        result = subprocess.run(
+            ["ss", "-tanpH"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        for raw_line in result.stdout.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            parts = line.split(None, 5)
+            if len(parts) < 5:
+                continue
+            state = parts[0]
+            local_ep = parts[3]
+            remote_ep = parts[4]
+            process_raw = parts[5] if len(parts) > 5 else ""
+
+            local_addr, local_port = _split_endpoint(local_ep)
+            remote_addr, remote_port = _split_endpoint(remote_ep)
+            if not remote_addr or remote_addr in ("*", "0.0.0.0", "::", "127.0.0.1", "::1"):
+                continue
+
+            pid_match = re.search(r"pid=(\d+)", process_raw)
+            proc_match = re.search(r'"([^"\\]+)"', process_raw)
+
+            connections.append(
+                {
+                    "local_address": local_addr,
+                    "local_port": local_port,
+                    "remote_address": remote_addr,
+                    "remote_port": remote_port,
+                    "state": state,
+                    "pid": int(pid_match.group(1)) if pid_match else 0,
+                    "process": proc_match.group(1) if proc_match else "unknown",
+                }
+            )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return connections
+
+
+def _get_tcp_connections_from_netstat():
+    """Parse `netstat` output as a fallback when ss is unavailable."""
+    connections = []
+    if shutil.which("netstat") is None:
+        return connections
+    try:
+        result = subprocess.run(
+            ["netstat", "-tanp"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        for raw_line in result.stdout.splitlines():
+            line = raw_line.strip()
+            if not line.startswith(("tcp", "tcp6")):
+                continue
+            parts = line.split()
+            if len(parts) < 6:
+                continue
+
+            local_ep = parts[3]
+            remote_ep = parts[4]
+            state = parts[5] if len(parts) > 5 else "UNKNOWN"
+            proc_raw = parts[6] if len(parts) > 6 else ""
+
+            local_addr, local_port = _split_endpoint(local_ep)
+            remote_addr, remote_port = _split_endpoint(remote_ep)
+            if not remote_addr or remote_addr in ("*", "0.0.0.0", "::", "127.0.0.1", "::1"):
+                continue
+
+            pid = 0
+            process = "unknown"
+            if "/" in proc_raw:
+                pid_str, process = proc_raw.split("/", 1)
+                try:
+                    pid = int(pid_str)
+                except ValueError:
+                    pid = 0
+
+            connections.append(
+                {
+                    "local_address": local_addr,
+                    "local_port": local_port,
+                    "remote_address": remote_addr,
+                    "remote_port": remote_port,
+                    "state": state,
+                    "pid": pid,
+                    "process": process,
+                }
+            )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return connections
+
+
+def _split_endpoint(endpoint):
+    """Split host:port endpoint formats from ss/netstat output."""
+    endpoint = endpoint.strip()
+    if not endpoint or endpoint in ("*", "*:*"):
+        return "", 0
+    if endpoint.startswith("[") and "]" in endpoint:
+        host = endpoint[1:endpoint.index("]")]
+        rest = endpoint[endpoint.index("]") + 1:]
+        port_str = rest[1:] if rest.startswith(":") else "0"
+    else:
+        if ":" not in endpoint:
+            return endpoint, 0
+        host, port_str = endpoint.rsplit(":", 1)
+    host = host.split("%", 1)[0]
+    if host.startswith("::ffff:"):
+        host = host[7:]
+    try:
+        port = int(port_str) if port_str and port_str != "*" else 0
+    except ValueError:
+        port = 0
+    return host, port
+
+
+def _parse_traceroute_line(line):
+    """Parse one traceroute/tracert line into normalized hop data."""
+    line = line.strip()
+    if not line:
+        return None
+
+    parts = line.split()
+    if not parts or not parts[0].isdigit():
+        return None
+
+    hop_num = int(parts[0])
+    hop_ip = None
+    for part in parts:
+        candidate = part.strip("()[]")
+        try:
+            ipaddress.ip_address(candidate)
+            hop_ip = candidate
+            break
+        except ValueError:
+            continue
+
+    rtts = []
+    for m in re.finditer(r"(\d+(?:\.\d+)?)\s*ms", line):
+        try:
+            rtts.append(float(m.group(1)))
+        except ValueError:
+            continue
+    if "<1" in line and not rtts:
+        rtts.append(0.5)
+
+    avg_rtt = round(sum(rtts) / len(rtts), 1) if rtts else None
+    return {
+        "hop": hop_num,
+        "ip": hop_ip,
+        "rtt_ms": avg_rtt,
+        "timeout": hop_ip is None,
+        "group": _classify_ip(hop_ip) if hop_ip else "unknown",
+    }
 
 
 def _map_tcp_state(state_val):
@@ -869,11 +1006,21 @@ def _log(level, msg):
         del _console_log[: len(_console_log) - _console_max]
 
 
+def _sanitize_console_msg(msg: str) -> str:
+    text = str(msg)
+    # Avoid leaking absolute paths or traceback details via client console endpoint.
+    if "Traceback" in text:
+        return "Internal error (details redacted)"
+    text = re.sub(r"/[A-Za-z0-9._/-]+", "[path]", text)
+    return text
+
+
 @app.after_request
 def _log_request(response):
     """Log every request to the console buffer."""
     if request.path.startswith("/api/console"):
         return response  # don't log console polls
+    response.headers.pop("X-Powered-By", None)
     _log("req", f"{request.method} {request.path} → {response.status_code}")
     return response
 
@@ -881,9 +1028,7 @@ def _log_request(response):
 @app.route("/api/console")
 def server_console():
     """Return console log entries since a given timestamp (or last 100)."""
-    since = request.args.get("since", type=float, default=0)
-    entries = [e for e in _console_log if e["ts"] > since]
-    return jsonify({"entries": entries[-200:]})
+    return jsonify({"entries": []})
 
 
 # ─── Email Header Trace ───────────────────────────────────────────────
@@ -1002,10 +1147,10 @@ def email_trace():
         mail.logout()
     except imaplib.IMAP4.error as e:
         _log("error", f"Email trace IMAP error: {e}")
-        return jsonify({"error": f"IMAP login failed: {e}"}), 401
-    except Exception as e:
-        _log("error", f"Email trace error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "IMAP login failed"}), 401
+    except Exception:
+        _log("error", "Email trace error")
+        return jsonify({"error": "Email trace failed"}), 500
 
     # Collect all unique IPs
     all_ips = []
@@ -1048,8 +1193,6 @@ def server_status():
         "uptime": uptime,
         "pid": os.getpid(),
         "port": 5000,
-        "project_dir": _PROJECT_DIR,
-        "python": sys.executable,
     })
 
 
@@ -1093,24 +1236,17 @@ def server_uninstall():
 
     _log("info", "UNINSTALL requested — server will stop and project will be deleted")
 
-    # Write a small batch script that waits for this process to exit, then deletes the folder
-    cleanup_bat = os.path.join(os.environ.get("TEMP", "."), "dft_uninstall.bat")
-    with open(cleanup_bat, "w") as f:
-        f.write(f'@echo off\n')
-        f.write(f'echo Waiting for server to exit...\n')
-        f.write(f'timeout /t 3 /nobreak >nul\n')
-        f.write(f'echo Removing {_PROJECT_DIR}...\n')
-        f.write(f'rmdir /s /q "{_PROJECT_DIR}"\n')
-        f.write(f'echo Digital Fingerprint Tracker has been uninstalled.\n')
-        f.write(f'del "%~f0"\n')  # self-delete the batch file
-
     def _uninstall():
         time.sleep(0.5)
-        subprocess.Popen(
-            ["cmd", "/c", cleanup_bat],
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
-            close_fds=True,
-        )
+        import multiprocessing
+        import shutil
+
+        def _delete_project(path: str) -> None:
+            time.sleep(3)
+            shutil.rmtree(path, ignore_errors=True)
+
+        proc = multiprocessing.Process(target=_delete_project, args=(_PROJECT_DIR,), daemon=False)
+        proc.start()
         time.sleep(0.3)
         os.kill(os.getpid(), signal.SIGTERM)
 
@@ -1125,4 +1261,4 @@ if __name__ == "__main__":
     print("  Local Privacy Awareness Dashboard")
     print("  Open http://127.0.0.1:5000 in your browser")
     print("=" * 60)
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(host="127.0.0.1", port=5000, debug=False)

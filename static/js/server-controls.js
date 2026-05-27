@@ -145,7 +145,11 @@ const ServerControls = {
         const el = document.getElementById("sctrl-message");
         if (!el) return;
         const color = level === "error" ? "var(--red)" : level === "info" ? "var(--yellow)" : "var(--text-muted)";
-        el.innerHTML = `<span style="color:${color}">${this._escapeHtml(msg)}</span>`;
+        el.textContent = "";
+        const span = document.createElement("span");
+        span.style.color = color;
+        span.textContent = msg;
+        el.appendChild(span);
     },
 
     _escapeHtml(text) {

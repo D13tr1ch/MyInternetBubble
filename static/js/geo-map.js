@@ -18,10 +18,10 @@ const GeoMap = {
     _traceAbort: false,      // signal to stop tracing
 
     colors: {
-        self:    "#58a6ff",
-        hop:     "#d29922",
+        self: "#58a6ff",
+        hop: "#d29922",
         hopPrivate: "#8b949e",
-        line:    "#f8514966",
+        line: "#f8514966",
         hopLine: "#d2992266",
     },
 
@@ -134,8 +134,8 @@ const GeoMap = {
                 }).addTo(this.layerGroup);
                 sm.bindPopup(
                     `<div class="geo-popup"><strong>Your Location</strong><br>` +
-                    `IP: ${geoData.self_ip}<br>${geoData.self_geo.city}, ${geoData.self_geo.region}<br>` +
-                    `${geoData.self_geo.country}<br>ISP: ${geoData.self_geo.isp}<br>${geoData.self_geo.as}</div>`
+                    `IP: ${escapeHtml(geoData.self_ip)}<br>${escapeHtml(geoData.self_geo.city)}, ${escapeHtml(geoData.self_geo.region)}<br>` +
+                    `${escapeHtml(geoData.self_geo.country)}<br>ISP: ${escapeHtml(geoData.self_geo.isp)}<br>${escapeHtml(geoData.self_geo.as)}</div>`
                 );
                 sm.bindTooltip("You", { direction: "top", offset: [0, -12] });
             }
@@ -190,9 +190,9 @@ const GeoMap = {
         }).addTo(this.layerGroup);
 
         dm.bindPopup(
-            `<div class="geo-popup"><strong>${geo.city || "Unknown"}, ${geo.country || ""}</strong><br>` +
-            `IP: ${ip}<br>ISP: ${geo.isp}<br>Org: ${geo.org}<br>AS: ${geo.as}<br>` +
-            `Connections: ${connCount}<br>Process: ${processes}<br>Ports: ${ports}</div>`
+            `<div class="geo-popup"><strong>${escapeHtml(geo.city || "Unknown")}, ${escapeHtml(geo.country || "")}</strong><br>` +
+            `IP: ${escapeHtml(ip)}<br>ISP: ${escapeHtml(geo.isp)}<br>Org: ${escapeHtml(geo.org)}<br>AS: ${escapeHtml(geo.as)}<br>` +
+            `Connections: ${escapeHtml(connCount)}<br>Process: ${escapeHtml(processes)}<br>Ports: ${escapeHtml(ports)}</div>`
         );
         dm.bindTooltip(`${ip} — ${geo.city || geo.country} (${connCount})`, {
             direction: "top", offset: [0, -radius],
@@ -252,7 +252,7 @@ const GeoMap = {
                             if (first === 192 && parseInt(parts[1]) === 168) return false;
                             if (first === 127) return false;
                             return true;
-                        } catch(e) { return false; }
+                        } catch (e) { return false; }
                     });
 
                 // Batch geolocate hop IPs (skip already cached ones — server caches too)
@@ -266,7 +266,7 @@ const GeoMap = {
                         });
                         const gData = await gResp.json();
                         hopGeo = gData.results || {};
-                    } catch(e) { /* geo failed, still show trace without locations */ }
+                    } catch (e) { /* geo failed, still show trace without locations */ }
                 }
 
                 // Store and plot
@@ -390,16 +390,31 @@ const GeoMap = {
                 `<span><i style="background:${this.colors.hopPrivate}"></i> Hop (private)</span>`;
             return div;
         };
+
+        function escapeHtml(value) {
+            const s = String(value ?? "");
+            return s
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+        }
         legend.addTo(this.map);
     },
 
     _renderTable() {
         const section = document.getElementById("geo-table-section");
         if (!section) return;
+        section.textContent = "";
 
         const entries = Object.entries(this.geoResults).filter(([, g]) => g && g.lat != null);
         if (entries.length === 0) {
-            section.innerHTML = `<p style="color:var(--text-muted);margin-top:0.5rem;">No geolocated connections.</p>`;
+            const msg = document.createElement("p");
+            msg.style.color = "var(--text-muted)";
+            msg.style.marginTop = "0.5rem";
+            msg.textContent = "No geolocated connections.";
+            section.appendChild(msg);
             return;
         }
 
@@ -409,15 +424,26 @@ const GeoMap = {
             return ca.localeCompare(cb);
         });
 
-        let html = `<h3>Connection Locations (${entries.length})</h3><div class="conn-table-wrap"><table class="fp-table">
-            <tr>
-                <td class="label" style="font-weight:600;">IP</td>
-                <td style="font-weight:600;">City</td>
-                <td style="font-weight:600;">Country</td>
-                <td style="font-weight:600;">ISP / Org</td>
-                <td style="font-weight:600;">Hops</td>
-                <td style="font-weight:600;">#</td>
-            </tr>`;
+        const heading = document.createElement("h3");
+        heading.textContent = `Connection Locations (${entries.length})`;
+        section.appendChild(heading);
+
+        const wrap = document.createElement("div");
+        wrap.className = "conn-table-wrap";
+        const table = document.createElement("table");
+        table.className = "fp-table";
+        wrap.appendChild(table);
+        section.appendChild(wrap);
+
+        const headerRow = document.createElement("tr");
+        for (const label of ["IP", "City", "Country", "ISP / Org", "Hops", "#"]) {
+            const td = document.createElement("td");
+            td.style.fontWeight = "600";
+            if (label === "IP") td.className = "label";
+            td.textContent = label;
+            headerRow.appendChild(td);
+        }
+        table.appendChild(headerRow);
 
         for (const [ip, geo] of entries) {
             const node = this.connectionData
@@ -429,21 +455,49 @@ const GeoMap = {
                 ? `${Object.keys(td.hopGeo).length}/${td.hops.length}`
                 : `\u2014`;
 
-            html += `<tr>
-                <td class="mono">${ip}</td>
-                <td>${geo.city || "\u2014"}${geo.region ? ", " + geo.region : ""}</td>
-                <td>${geo.country || "\u2014"}</td>
-                <td>${geo.isp || geo.org || "\u2014"}</td>
-                <td>${hopsCol}</td>
-                <td>${count}</td>
-            </tr>`;
+            const row = document.createElement("tr");
+            const values = [
+                ip,
+                `${geo.city || "\u2014"}${geo.region ? ", " + geo.region : ""}`,
+                geo.country || "\u2014",
+                geo.isp || geo.org || "\u2014",
+                hopsCol,
+                String(count),
+            ];
+            values.forEach((v, idx) => {
+                const tdEl = document.createElement("td");
+                if (idx === 0) tdEl.className = "mono";
+                tdEl.textContent = v;
+                row.appendChild(tdEl);
+            });
+            table.appendChild(row);
 
             // Hop detail rows
             if (td && td.hops.length > 0) {
-                html += `<tr><td colspan="6" style="padding:0;"><table class="fp-table hop-table" style="margin:0;width:100%;border:none;">
-                    <tr style="font-size:0.7rem;color:var(--text-muted);">
-                        <td>#</td><td>IP</td><td>RTT</td><td>Location</td><td colspan="2">Service / ISP</td>
-                    </tr>`;
+                const detailRow = document.createElement("tr");
+                const detailCell = document.createElement("td");
+                detailCell.colSpan = 6;
+                detailCell.style.padding = "0";
+                const hopTable = document.createElement("table");
+                hopTable.className = "fp-table hop-table";
+                hopTable.style.margin = "0";
+                hopTable.style.width = "100%";
+                hopTable.style.border = "none";
+                detailCell.appendChild(hopTable);
+                detailRow.appendChild(detailCell);
+                table.appendChild(detailRow);
+
+                const hopHeader = document.createElement("tr");
+                hopHeader.style.fontSize = "0.7rem";
+                hopHeader.style.color = "var(--text-muted)";
+                for (const lbl of ["#", "IP", "RTT", "Location", "Service / ISP"]) {
+                    const th = document.createElement("td");
+                    th.textContent = lbl;
+                    if (lbl === "Service / ISP") th.colSpan = 2;
+                    hopHeader.appendChild(th);
+                }
+                hopTable.appendChild(hopHeader);
+
                 for (const hop of td.hops) {
                     const hg = hop.ip ? td.hopGeo[hop.ip] : null;
                     const hopIp = hop.ip || "*";
@@ -451,20 +505,23 @@ const GeoMap = {
                     const loc = hg ? `${hg.city || ""}, ${hg.country || ""}` : (hop.timeout ? "\u2014" : "private");
                     const svc = hg ? (hg.isp || hg.org || hg.as || "\u2014") : "\u2014";
                     const rowColor = hg ? "var(--text)" : "var(--text-muted)";
-                    html += `<tr style="font-size:0.75rem;color:${rowColor};">
-                        <td>${hop.hop}</td>
-                        <td class="mono">${hopIp}</td>
-                        <td>${rtt}</td>
-                        <td>${loc}</td>
-                        <td colspan="2">${svc}</td>
-                    </tr>`;
+
+                    const hopRow = document.createElement("tr");
+                    hopRow.style.fontSize = "0.75rem";
+                    hopRow.style.color = rowColor;
+
+                    const hopCols = [String(hop.hop), hopIp, rtt, loc, svc];
+                    hopCols.forEach((col, idx) => {
+                        const tdHop = document.createElement("td");
+                        if (idx === 1) tdHop.className = "mono";
+                        if (idx === 4) tdHop.colSpan = 2;
+                        tdHop.textContent = col;
+                        hopRow.appendChild(tdHop);
+                    });
+                    hopTable.appendChild(hopRow);
                 }
-                html += `</table></td></tr>`;
             }
         }
-
-        html += `</table></div>`;
-        section.innerHTML = html;
     },
 
     _setStatus(msg) {
